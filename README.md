@@ -1,0 +1,127 @@
+# Olist E-Commerce Analytics Pipeline
+
+An end-to-end data engineering pipeline built on the
+[Olist Brazilian E-Commerce dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce)
+(~100k orders, 2016–2018). It ingests orders, customers, products, payments and reviews,
+lands them in an S3 data lake, transforms them with Glue and dbt, models them in Snowflake,
+and serves revenue, retention and product dashboards in Power BI. Airflow runs it daily.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    A[Olist CSVs<br/>Kaggle] -->|seed| B[(Postgres<br/>source OLTP)]
+    B -->|Python incremental<br/>extract| C[S3 raw/<br/>Parquet]
+    E[Order event<br/>simulator] -->|JSON events| L[Lambda<br/>validate]
+    L --> C
+    L -->|bad events| Q[S3 quarantine/]
+    C -->|Glue PySpark| D[S3 processed/]
+    D -->|COPY INTO| F[(Snowflake RAW)]
+    F -->|dbt| G[(Snowflake<br/>STAGING → MARTS)]
+    G --> H[Power BI]
+    AF[Airflow daily DAG] -.orchestrates.-> B & C & D & F & G
+```
+
+### Simulating a live store
+The dataset is historical, so each pipeline run processes one **business date** of Olist
+history: `--date 2017-11-24` extracts that day's orders, items, payments and customers,
+plus reviews created that day (they arrive *after* the order, so they're real late-arriving data).
+Airflow will map its run date to an Olist date so the daily schedule replays the store.
+
+## Roadmap
+
+| Phase | Scope | Status |
+|---|---|---|
+| 1 | Postgres source DB, Python incremental extraction → data lake (local / S3), manifests, tests | ✅ done |
+| 2 | AWS: S3 bucket and IAM (Terraform), run extraction against S3 | ✅ done |
+| 3 | Lambda: real-time order events → validate → raw / quarantine | ⬜ |
+| 4 | Glue: raw → processed (cleaning, dedupe, typing, category translation) | ⬜ |
+| 5 | Snowflake: storage integration, stage, RAW tables, `COPY INTO` | ⬜ |
+| 6 | dbt: staging → intermediate → marts, tests, docs | ⬜ |
+| 7 | Airflow: daily DAG, retries, SLAs, alerting | ⬜ |
+| 8 | Power BI: Revenue, Customers & Retention, Products dashboards | ⬜ |
+| 9 | CI (GitHub Actions: pytest + `dbt build`), data quality monitoring page | ⬜ |
+
+## Dashboard metrics (planned)
+| Metric | Definition |
+|---|---|
+| Total revenue | Sum of item `price` + `freight_value` for non-canceled orders |
+| Monthly revenue (run rate) | Revenue per calendar month. Olist has no subscriptions, so this stands in for MRR. |
+| Average order value | Revenue / distinct orders |
+| Customer lifetime value | Revenue per `customer_unique_id` over their lifetime |
+| Top-selling products | Units and revenue by product / English category |
+| Customer churn | Share of customers with no purchase in the last N days (e.g. 180) |
+
+> ⚠️ Use `customer_unique_id` for anything customer-level. `customer_id` is new on **every order**.
+
+## Quick start (Phase 1)
+
+Prerequisites: Python 3.9+, [Docker Desktop](https://www.docker.com/products/docker-desktop/),
+a [Kaggle API token](https://www.kaggle.com/settings) saved to `~/.kaggle/access_token`.
+
+```bash
+make setup                     # venv + dependencies + .env
+make db-up                     # start Postgres in Docker
+make download                  # Olist CSVs -> data/source/
+make seed                      # load CSVs into Postgres (olist schema)
+make extract DATE=2017-11-24   # one day -> data/lake/raw/...
+make backfill START=2017-01-01 END=2017-01-31
+make test
+```
+
+Set `LAKE_TARGET=s3` and `S3_BUCKET=...` in `.env` to write to AWS instead of `data/lake/`.
+
+### Lake layout
+```
+raw/olist/<table>/dt=YYYY-MM-DD/<table>.parquet   # + _batch_id, _business_date, _extracted_at
+raw/_manifests/dt=YYYY-MM-DD/manifest.json        # row counts per table, written last = success marker
+```
+Re-running a date overwrites the same files, so runs are idempotent and backfills are safe.
+
+| Table | Load mode |
+|---|---|
+| orders, order_items, order_payments, customers | incremental (by order purchase date) |
+| order_reviews | incremental (by review creation date) |
+| products, sellers, product_category_translation | daily snapshot |
+| geolocation | static (`--include-static`) |
+
+## Phase 2: AWS data lake (Terraform)
+
+`infra/terraform/` creates:
+
+| Resource | Why |
+|---|---|
+| S3 bucket `olist-pipeline-lake-<account_id>` | Data lake (`raw/`, `processed/`, `quarantine/`) |
+| Public access block, ACLs disabled, TLS-only bucket policy | Nothing in the lake is ever public or sent unencrypted |
+| Versioning + SSE-S3 encryption | Recover from bad overwrites; encrypted at rest at no cost |
+| Lifecycle rules | Old versions expire after 30 days, raw files over 128 KB move to Standard-IA after 90 days, quarantine expires after 90 days |
+| IAM role `olist-pipeline-ingestion` | Least privilege: read/write on `raw/*` only. Assumed through STS, so there are no long-lived keys. |
+| AWS Budget ($10/month) | Email alert at 80% actual or 100% forecasted spend |
+
+```bash
+# one-time: an admin IAM user's access keys in a named profile (never the root account)
+aws configure --profile olist-admin
+
+cp infra/terraform/terraform.tfvars.example infra/terraform/terraform.tfvars   # set alert_email
+make tf-init && make tf-plan && make tf-apply
+terraform -chdir=infra/terraform output -raw aws_config_snippet >> ~/.aws/config
+```
+Then in `.env` set `LAKE_TARGET=s3`, `S3_BUCKET=<lake_bucket output>` and `AWS_PROFILE=olist-ingestion`,
+and run `make extract DATE=2017-11-24` and `make s3-check`.
+
+## Project structure
+```
+├── docker-compose.yml        # Postgres source DB
+├── Makefile
+├── ingestion/
+│   ├── config.py             # env-driven settings
+│   ├── tables.py             # what to extract + load mode per table
+│   ├── storage.py            # local / S3 writers (same interface)
+│   └── extract.py            # CLI: incremental extract -> Parquet + manifest
+├── scripts/
+│   ├── download_data.sh      # Kaggle download
+│   └── seed_postgres.py      # CSV -> Postgres via COPY
+├── sql/source/schema.sql     # source DDL
+├── infra/terraform/          # S3 lake, IAM role, budget (Phase 2)
+└── tests/                    # pytest: SQLite + moto (no Docker or AWS needed)
+```
