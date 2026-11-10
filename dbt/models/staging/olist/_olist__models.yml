@@ -1,0 +1,141 @@
+version: 2
+
+models:
+  - name: stg_olist__orders
+    description: One row per order, typed and deduplicated to the latest extracted version.
+    columns:
+      - name: order_id
+        data_tests: [unique, not_null]
+      - name: customer_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_olist__customers')
+                field: customer_id
+      - name: order_status
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [created, approved, invoiced, processing, shipped, delivered, canceled, unavailable]
+      - name: purchased_at
+        data_tests: [not_null]
+
+  - name: stg_olist__order_items
+    description: One row per item line within an order.
+    columns:
+      - name: order_item_key
+        data_tests: [unique, not_null]
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_olist__orders')
+                field: order_id
+      - name: product_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_olist__products')
+                field: product_id
+      - name: seller_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_olist__sellers')
+                field: seller_id
+      - name: price
+        data_tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: freight_value
+        data_tests:
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: ">= 0"
+
+  - name: stg_olist__order_payments
+    description: One row per payment (an order can be split across payment methods / vouchers).
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [order_id, payment_sequence]
+    columns:
+      - name: order_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('stg_olist__orders')
+                field: order_id
+      - name: payment_type
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [credit_card, boleto, voucher, debit_card, not_defined]
+      - name: payment_value
+        data_tests:
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: ">= 0"
+
+  - name: stg_olist__order_reviews
+    description: Customer reviews; grain is (review_id, order_id).
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [review_id, order_id]
+    columns:
+      - name: review_score
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [1, 2, 3, 4, 5]
+                quote: false
+      - name: order_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('stg_olist__orders')
+                field: order_id
+
+  - name: stg_olist__customers
+    description: One row per customer_id (i.e. per order). Use customer_unique_id for people.
+    columns:
+      - name: customer_id
+        data_tests: [unique, not_null]
+      - name: customer_unique_id
+        data_tests: [not_null]
+      - name: state
+        data_tests:
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: "rlike '^[A-Z]{2}$'"
+
+  - name: stg_olist__products
+    columns:
+      - name: product_id
+        data_tests: [unique, not_null]
+
+  - name: stg_olist__sellers
+    columns:
+      - name: seller_id
+        data_tests: [unique, not_null]
+
+  - name: stg_olist__product_category_translation
+    columns:
+      - name: category_name_pt
+        data_tests: [unique, not_null]
+
+  - name: stg_olist__geolocation
+    description: Raw geolocation points (many per zip prefix); aggregated in int_zip_codes.
+    columns:
+      - name: zip_code_prefix
+        data_tests: [not_null]

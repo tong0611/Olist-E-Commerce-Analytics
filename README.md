@@ -4,7 +4,7 @@ An end-to-end data engineering pipeline built on the
 [Olist Brazilian E-Commerce dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce)
 (~100k orders, 2016–2018). It ingests orders, customers, products, payments and reviews,
 lands them in an S3 data lake, transforms them with Glue and dbt, models them in Snowflake,
-and serves revenue, retention and product dashboards in Power BI. Airflow runs it daily.
+and publishes revenue, retention and product dashboards to Tableau Public. Airflow runs it daily.
 
 ## Architecture
 
@@ -18,7 +18,7 @@ flowchart LR
     C -->|Glue PySpark| D[S3 processed/]
     D -->|COPY INTO| F[(Snowflake RAW)]
     F -->|dbt| G[(Snowflake<br/>STAGING → MARTS)]
-    G --> H[Power BI]
+    G -->|export_marts.py<br/>CSV| H[Tableau Public]
     AF[Airflow daily DAG] -.orchestrates.-> B & C & D & F & G
 ```
 
@@ -37,9 +37,9 @@ Airflow will map its run date to an Olist date so the daily schedule replays the
 | 3 | Lambda: real-time order events → validate → raw / quarantine | ⬜ |
 | 4 | Glue: raw → processed (cleaning, dedupe, typing, category translation) | ⬜ |
 | 5 | Snowflake: storage integration, stage, RAW tables, `COPY INTO`, reconciliation | ✅ done |
-| 6 | dbt: staging → intermediate → marts, tests, docs | ⬜ |
+| 6 | dbt: staging → intermediate → marts, 105 tests, docs | ✅ done |
 | 7 | Airflow: daily DAG, retries, SLAs, alerting | ⬜ |
-| 8 | Power BI: Revenue, Customers & Retention, Products dashboards | ⬜ |
+| 8 | Tableau Public: Revenue, Customers & Retention, Products dashboards (marts exported to CSV) | ⬜ |
 | 9 | CI (GitHub Actions: pytest + `dbt build`), data quality monitoring page | ⬜ |
 
 ## Dashboard metrics (planned)
@@ -56,7 +56,7 @@ Airflow will map its run date to an Olist date so the daily schedule replays the
 
 ## Quick start (Phase 1)
 
-Prerequisites: Python 3.9+, [Docker Desktop](https://www.docker.com/products/docker-desktop/),
+Prerequisites: Python 3.12 (`brew install python@3.12`), [Docker Desktop](https://www.docker.com/products/docker-desktop/),
 a [Kaggle API token](https://www.kaggle.com/settings) saved to `~/.kaggle/access_token`.
 
 ```bash
@@ -138,6 +138,50 @@ make load DATE=2017-11-24
 > The Snowflake account is in AWS us-east-2 and the bucket in us-east-1, so S3 reads incur inter-region transfer
 > (~$0.02/GB, a few cents for this whole dataset). In production you'd co-locate them.
 
+## Phase 6: dbt transformations
+
+```
+RAW (VARIANT) ──► STAGING (views)            ──► INTERMEDIATE (views)      ──► MARTS (tables)
+                  stg_olist__* x9                int_orders__items_agg         fct_orders, fct_order_items
+                  type, rename, dedupe           int_orders__payments_agg      dim_customers, dim_products,
+                  latest file version            int_orders__reviews_agg       dim_sellers, dim_date
+                                                 int_zip_codes                 mart_revenue_monthly
+                                                                               mart_customer_cohorts
+                                                                               mart_product_performance
+```
+
+| Decision | Why |
+|---|---|
+| Customer grain = `customer_unique_id` | `customer_id` is regenerated per order; using it would make every customer look one-time |
+| Revenue = merchandise + freight, excluding `canceled` / `unavailable` | Configurable via `var('non_revenue_statuses')`; tested to tie out across order, item and month grains |
+| Churn = no purchase in 180 days, measured from the latest order in the data | The "simulation clock"; window is `var('churn_window_days')` |
+| MRR → monthly revenue run rate | Olist has no subscriptions |
+| Marts are full-refresh tables, not incremental | ~100k orders rebuild in seconds; incremental logic would add risk (late-arriving reviews) for no gain at this scale |
+| Geolocation cleaned to Brazil's bounding box, averaged per zip prefix | Raw data has points in other countries and many points per zip |
+
+**Tests (105):** unique / not-null keys, relationships between every fact and dimension, accepted values
+(statuses, payment types, review scores), non-negative money, cohort retention between 0 and 1, plus singular tests:
+- `assert_revenue_ties_out_across_grains`: order, item and monthly revenue sums must match
+- `assert_latest_loads_reconciled`: dbt won't build on top of a load whose reconciliation failed
+- `assert_payments_cover_order_value`, `assert_delivered_orders_have_delivery_date`: known source quirks
+  (256 and 8 rows), set to **warn**, and to fail only if they grow
+
+**Results on the full history:**
+
+| Metric | Value |
+|---|---|
+| Orders / customers | 99,441 / 96,096 |
+| Total revenue | R$15,735,527.03 (matches the source database to the cent) |
+| Average order value | R$160.23 |
+| Repeat customers | 2,888 (3.0%) · avg CLV R$308 vs R$161 for one-time buyers |
+| Churned (180-day window) | ~71% |
+| Top category | Health & Beauty, R$1.44M |
+
+```bash
+make dbt-deps && make dbt-build     # run + test everything (via scripts/dbt.sh, which loads .env)
+make dbt-docs                       # lineage graph at http://localhost:8081
+```
+
 ## Project structure
 ```
 ├── docker-compose.yml        # Postgres source DB
@@ -154,5 +198,6 @@ make load DATE=2017-11-24
 ├── infra/terraform/          # S3 lake, IAM roles (ingestion + Snowflake), budget
 ├── snowflake/                # account setup SQL template (Phase 5)
 ├── loading/                  # S3 -> Snowflake COPY + reconciliation
+├── dbt/                      # staging / intermediate / marts models, tests, macros
 └── tests/                    # pytest: SQLite + moto (no Docker or AWS needed)
 ```

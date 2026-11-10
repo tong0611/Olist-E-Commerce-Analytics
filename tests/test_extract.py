@@ -83,6 +83,12 @@ def test_empty_day_writes_manifest_but_no_files(engine, tmp_path):
     assert (tmp_path / manifest_key(empty_day)).exists()
 
 
+def test_snapshots_can_be_skipped(engine, tmp_path):
+    m = run_extract(DAY, engine, LocalStorage(str(tmp_path)), schema="main", include_snapshots=False)
+    assert "products" not in m["tables"] and "sellers" not in m["tables"]
+    assert m["tables"]["orders"]["rows"] == 2
+
+
 def test_rerun_is_idempotent(engine, tmp_path):
     storage = LocalStorage(str(tmp_path))
     run_extract(DAY, engine, storage, schema="main")

@@ -1,0 +1,32 @@
+name: olist
+version: "1.0.0"
+profile: olist
+
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+clean-targets: ["target", "dbt_packages"]
+
+vars:
+  # A customer is churned if their last purchase is older than this, measured
+  # from the latest order date in the data (the "simulation clock").
+  churn_window_days: 180
+  # Order statuses that never turn into revenue.
+  non_revenue_statuses: ["canceled", "unavailable"]
+
+models:
+  olist:
+    +persist_docs:
+      relation: true
+      columns: true
+    staging:
+      +schema: staging
+      +materialized: view
+    intermediate:
+      +schema: intermediate
+      +materialized: view
+    marts:
+      +schema: marts
+      +materialized: table
+      +grants:
+        select: ["OLIST_REPORTER"]

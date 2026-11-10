@@ -1,0 +1,43 @@
+version: 2
+
+models:
+  - name: mart_revenue_monthly
+    description: Monthly revenue, orders, AOV, new vs returning customers and growth (dashboard - Revenue page).
+    columns:
+      - name: month
+        data_tests: [unique, not_null]
+      - name: revenue
+        data_tests:
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: returning_customers
+        data_tests:
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: ">= 0"
+
+  - name: mart_customer_cohorts
+    description: Cohort retention triangle (dashboard - Customers & Retention page).
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [cohort_month, months_since_first_purchase]
+    columns:
+      - name: retention_rate
+        data_tests:
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: "between 0 and 1"
+
+  - name: mart_product_performance
+    description: Product-level sales and ranking (dashboard - Products page).
+    columns:
+      - name: product_id
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_products')
+                field: product_id

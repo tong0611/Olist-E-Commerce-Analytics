@@ -29,7 +29,7 @@ from sqlalchemy.engine import Engine
 
 from ingestion.config import Settings
 from ingestion.storage import Storage, get_storage
-from ingestion.tables import INCREMENTAL, STATIC, TABLES, TableSpec
+from ingestion.tables import INCREMENTAL, SNAPSHOT, STATIC, TABLES, TableSpec
 
 log = logging.getLogger("ingestion.extract")
 
@@ -81,6 +81,7 @@ def run_extract(
     schema: str,
     include_static: bool = False,
     tables: Iterable[TableSpec] = TABLES,
+    include_snapshots: bool = True,
 ) -> dict:
     extracted_at = datetime.now(timezone.utc)
     batch_id = f"{business_date.isoformat()}_{uuid.uuid4().hex[:8]}"
@@ -93,6 +94,8 @@ def run_extract(
 
     for spec in tables:
         if spec.mode == STATIC and not include_static:
+            continue
+        if spec.mode == SNAPSHOT and not include_snapshots:
             continue
         df = extract_table(engine, spec, business_date, schema)
         entry: dict = {"mode": spec.mode, "rows": int(len(df)), "uri": None}
@@ -142,8 +145,14 @@ def main(argv: Optional[list[str]] = None) -> None:
     dates = [args.date] if args.date else list(daterange(args.start, args.end))
     for i, d in enumerate(dates):
         log.info("=== extracting business date %s -> %s ===", d, settings.lake_target)
-        # static tables only need to be pulled once per run
-        manifest = run_extract(d, engine, storage, settings.pg_schema, include_static=args.include_static and i == 0)
+        # In a backfill, static tables are pulled once (first day) and snapshot
+        # dimensions once (last day): the source keeps no history for them, so
+        # a copy per historical day would be identical and wasteful.
+        manifest = run_extract(
+            d, engine, storage, settings.pg_schema,
+            include_static=args.include_static and i == 0,
+            include_snapshots=(i == len(dates) - 1),
+        )
         total = sum(t["rows"] for t in manifest["tables"].values())
         log.info("batch %s done: %d rows across %d tables", manifest["batch_id"], total, len(manifest["tables"]))
 

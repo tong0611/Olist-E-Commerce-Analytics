@@ -1,10 +1,10 @@
 PY := .venv/bin/python
 DATE ?= 2017-11-24
 
-.PHONY: setup db-up db-down download seed extract backfill test clean-lake tf-init tf-plan tf-apply s3-check snowflake-render sf-bootstrap load load-range
+.PHONY: setup db-up db-down download seed extract backfill test clean-lake tf-init tf-plan tf-apply s3-check snowflake-render sf-bootstrap load load-range dbt-deps dbt-build dbt-docs dbt-freshness
 
 setup:            ## create virtualenv and install dependencies
-	python3 -m venv .venv
+	/opt/homebrew/bin/python3.12 -m venv .venv
 	$(PY) -m pip install -q --upgrade pip
 	$(PY) -m pip install -q -r requirements-dev.txt
 	@test -f .env || cp .env.example .env
@@ -61,3 +61,18 @@ load:             ## make load DATE=2017-11-24
 
 load-range:       ## make load-range START=2017-11-20 END=2017-11-26
 	$(PY) -m loading.load_raw --start $(START) --end $(END)
+
+# --- Phase 6: dbt ---
+DBT := bash scripts/dbt.sh
+
+dbt-deps:
+	$(DBT) deps
+
+dbt-build:        ## run + test every model (fails on any error-severity test)
+	$(DBT) build
+
+dbt-docs:         ## generate and serve the dbt docs site with lineage graph
+	$(DBT) docs generate && $(DBT) docs serve --port 8081
+
+dbt-freshness:
+	$(DBT) source freshness

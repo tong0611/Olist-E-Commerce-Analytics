@@ -1,0 +1,35 @@
+version: 2
+
+sources:
+  - name: olist
+    description: >
+      Raw Olist extracts loaded from the S3 lake by loading/load_raw.py.
+      One VARIANT column per row plus file metadata; typed in staging.
+    database: OLIST
+    schema: RAW
+    config:
+      loaded_at_field: _loaded_at
+      freshness:
+        warn_after: {count: 2, period: day}
+    tables:
+      - name: orders
+      - name: order_items
+      - name: order_payments
+      - name: order_reviews
+      - name: customers
+      - name: products
+      - name: sellers
+      - name: product_category_translation
+        config:
+          freshness: null
+      - name: geolocation
+        config:
+          freshness: null
+
+  - name: audit
+    description: Load audit tables written by the loader.
+    database: OLIST
+    schema: AUDIT
+    tables:
+      - name: load_reconciliation
+      - name: copy_history

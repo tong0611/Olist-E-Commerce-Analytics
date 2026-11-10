@@ -1,0 +1,17 @@
+# No secrets here: everything comes from environment variables (.env), and
+# authentication is key-pair only. Run dbt through scripts/dbt.sh, which loads .env.
+olist:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_DBT_USER', 'OLIST_DBT_SVC') }}"
+      authenticator: snowflake_jwt
+      private_key_path: "{{ env_var('SNOWFLAKE_DBT_KEY', env_var('HOME') ~ '/.snowflake/keys/olist_dbt_rsa_key.p8') }}"
+      role: OLIST_TRANSFORMER
+      warehouse: OLIST_TRANSFORM_WH
+      database: "{{ env_var('SNOWFLAKE_DATABASE', 'OLIST') }}"
+      schema: STAGING
+      threads: 4
+      query_tag: "olist-pipeline:dbt"

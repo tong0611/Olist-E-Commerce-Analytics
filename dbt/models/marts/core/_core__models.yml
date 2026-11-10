@@ -1,0 +1,90 @@
+version: 2
+
+models:
+  - name: fct_orders
+    description: One row per order with value, payment, delivery and review facts.
+    columns:
+      - name: order_id
+        data_tests: [unique, not_null]
+      - name: customer_unique_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_customers')
+                field: customer_unique_id
+      - name: purchase_date
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_day
+      - name: revenue
+        description: order_value for revenue orders, otherwise 0
+        data_tests:
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: ">= 0"
+      - name: primary_payment_type
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [credit_card, boleto, voucher, debit_card, not_defined]
+
+  - name: fct_order_items
+    description: One row per order item line.
+    columns:
+      - name: order_item_key
+        data_tests: [unique, not_null]
+      - name: order_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('fct_orders')
+                field: order_id
+      - name: product_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_products')
+                field: product_id
+      - name: seller_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_sellers')
+                field: seller_id
+
+  - name: dim_customers
+    description: One row per real customer (customer_unique_id) with CLV and churn flags.
+    columns:
+      - name: customer_unique_id
+        data_tests: [unique, not_null]
+      - name: customer_type
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [no_purchase, one_time, repeat]
+      - name: customer_lifetime_value
+        data_tests:
+          - dbt_utils.expression_is_true:
+              arguments:
+                expression: ">= 0"
+
+  - name: dim_products
+    columns:
+      - name: product_id
+        data_tests: [unique, not_null]
+      - name: category_name
+        data_tests: [not_null]
+
+  - name: dim_sellers
+    columns:
+      - name: seller_id
+        data_tests: [unique, not_null]
+
+  - name: dim_date
+    columns:
+      - name: date_day
+        data_tests: [unique, not_null]

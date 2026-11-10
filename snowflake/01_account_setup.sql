@@ -24,7 +24,7 @@ CREATE RESOURCE MONITOR IF NOT EXISTS OLIST_MONTHLY_MONITOR
 -- ---------------------------------------------------------------------------
 CREATE ROLE IF NOT EXISTS OLIST_LOADER      COMMENT = 'Loads raw files from S3 into OLIST.RAW';
 CREATE ROLE IF NOT EXISTS OLIST_TRANSFORMER COMMENT = 'dbt: reads RAW, builds STAGING/INTERMEDIATE/MARTS';
-CREATE ROLE IF NOT EXISTS OLIST_REPORTER    COMMENT = 'Power BI: read-only on MARTS';
+CREATE ROLE IF NOT EXISTS OLIST_REPORTER    COMMENT = 'BI / dashboard exports: read-only on MARTS';
 GRANT ROLE OLIST_LOADER, OLIST_TRANSFORMER, OLIST_REPORTER TO ROLE SYSADMIN;
 
 -- ---------------------------------------------------------------------------
