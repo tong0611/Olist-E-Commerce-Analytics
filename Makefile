@@ -1,7 +1,7 @@
 PY := .venv/bin/python
 DATE ?= 2017-11-24
 
-.PHONY: setup db-up db-down download seed extract backfill test clean-lake tf-init tf-plan tf-apply s3-check
+.PHONY: setup db-up db-down download seed extract backfill test clean-lake tf-init tf-plan tf-apply s3-check snowflake-render sf-bootstrap load load-range
 
 setup:            ## create virtualenv and install dependencies
 	python3 -m venv .venv
@@ -48,3 +48,16 @@ tf-apply:
 s3-check:         ## confirm the pipeline role can write to the lake
 	aws sts get-caller-identity --profile olist-ingestion
 	aws s3 ls s3://$$(terraform -chdir=infra/terraform output -raw lake_bucket)/raw/ --profile olist-ingestion
+
+# --- Phase 5: Snowflake ---
+snowflake-render: ## fill snowflake/01_account_setup.sql -> build/ (paste into Snowsight)
+	$(PY) scripts/render_snowflake_setup.py
+
+sf-bootstrap:     ## create stage + RAW/AUDIT tables
+	$(PY) -m loading.load_raw --bootstrap
+
+load:             ## make load DATE=2017-11-24
+	$(PY) -m loading.load_raw --date $(DATE)
+
+load-range:       ## make load-range START=2017-11-20 END=2017-11-26
+	$(PY) -m loading.load_raw --start $(START) --end $(END)

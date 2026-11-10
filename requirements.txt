@@ -5,3 +5,4 @@ SQLAlchemy>=2.0,<3
 psycopg2-binary>=2.9
 boto3>=1.34
 python-dotenv>=1.0
+snowflake-connector-python>=3.12

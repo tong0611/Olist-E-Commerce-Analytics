@@ -36,7 +36,7 @@ Airflow will map its run date to an Olist date so the daily schedule replays the
 | 2 | AWS: S3 bucket and IAM (Terraform), run extraction against S3 | ✅ done |
 | 3 | Lambda: real-time order events → validate → raw / quarantine | ⬜ |
 | 4 | Glue: raw → processed (cleaning, dedupe, typing, category translation) | ⬜ |
-| 5 | Snowflake: storage integration, stage, RAW tables, `COPY INTO` | ⬜ |
+| 5 | Snowflake: storage integration, stage, RAW tables, `COPY INTO`, reconciliation | ✅ done |
 | 6 | dbt: staging → intermediate → marts, tests, docs | ⬜ |
 | 7 | Airflow: daily DAG, retries, SLAs, alerting | ⬜ |
 | 8 | Power BI: Revenue, Customers & Retention, Products dashboards | ⬜ |
@@ -109,6 +109,35 @@ terraform -chdir=infra/terraform output -raw aws_config_snippet >> ~/.aws/config
 Then in `.env` set `LAKE_TARGET=s3`, `S3_BUCKET=<lake_bucket output>` and `AWS_PROFILE=olist-ingestion`,
 and run `make extract DATE=2017-11-24` and `make s3-check`.
 
+## Phase 5: Snowflake warehouse
+
+| Object | Details |
+|---|---|
+| Warehouses | `OLIST_LOAD_WH`, `OLIST_TRANSFORM_WH`, `OLIST_BI_WH`: X-Small, auto-suspend 60s, one per workload for cost attribution |
+| Resource monitor | 20 credits/month: notify at 75%, suspend at 100% |
+| Database `OLIST` | `RAW`, `AUDIT` (loader-owned); `STAGING`, `INTERMEDIATE`, `MARTS` (dbt-owned) |
+| Roles | `OLIST_LOADER`, `OLIST_TRANSFORMER`, `OLIST_REPORTER` (read-only on MARTS) |
+| Service users | `OLIST_LOADER_SVC`, `OLIST_DBT_SVC`: `TYPE = SERVICE`, key-pair auth only |
+| Storage integration | `OLIST_S3_LAKE` assumes the `olist-pipeline-snowflake` IAM role (trust locked to Snowflake's IAM user + external ID). No AWS keys are stored in Snowflake. |
+
+**Loading (ELT):** each RAW table holds `RAW_DATA VARIANT` + file metadata (`_SOURCE_FILE`, `_FILE_ROW_NUMBER`,
+`_FILE_LAST_MODIFIED`, `_LOADED_AT`). Typing happens in dbt, so source schema changes never break a load.
+`COPY INTO` load metadata makes re-runs no-ops.
+
+**Reconciliation:** after each load, the rows in RAW for the manifest's `batch_id` must equal the manifest row count
+for every table. Results go to `AUDIT.LOAD_RECONCILIATION`, per-file COPY results to `AUDIT.COPY_HISTORY`, and any
+mismatch fails the run.
+
+```bash
+make snowflake-render     # fill snowflake/01_account_setup.sql -> build/ ; run it in Snowsight as ACCOUNTADMIN
+# put DESC INTEGRATION's STORAGE_AWS_IAM_USER_ARN / STORAGE_AWS_EXTERNAL_ID in terraform.tfvars, then tf-plan / tf-apply
+make sf-bootstrap         # file formats, stage, RAW + AUDIT tables
+make load DATE=2017-11-24
+```
+
+> The Snowflake account is in AWS us-east-2 and the bucket in us-east-1, so S3 reads incur inter-region transfer
+> (~$0.02/GB, a few cents for this whole dataset). In production you'd co-locate them.
+
 ## Project structure
 ```
 ├── docker-compose.yml        # Postgres source DB
@@ -122,6 +151,8 @@ and run `make extract DATE=2017-11-24` and `make s3-check`.
 │   ├── download_data.sh      # Kaggle download
 │   └── seed_postgres.py      # CSV -> Postgres via COPY
 ├── sql/source/schema.sql     # source DDL
-├── infra/terraform/          # S3 lake, IAM role, budget (Phase 2)
+├── infra/terraform/          # S3 lake, IAM roles (ingestion + Snowflake), budget
+├── snowflake/                # account setup SQL template (Phase 5)
+├── loading/                  # S3 -> Snowflake COPY + reconciliation
 └── tests/                    # pytest: SQLite + moto (no Docker or AWS needed)
 ```
