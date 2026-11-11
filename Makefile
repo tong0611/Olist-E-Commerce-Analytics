@@ -1,7 +1,7 @@
 PY := .venv/bin/python
 DATE ?= 2017-11-24
 
-.PHONY: setup db-up db-down download seed extract backfill test clean-lake tf-init tf-plan tf-apply s3-check snowflake-render sf-bootstrap load load-range dbt-deps dbt-build dbt-docs dbt-freshness
+.PHONY: setup db-up db-down download seed extract backfill test clean-lake tf-init tf-plan tf-apply s3-check snowflake-render sf-bootstrap load load-range dbt-deps dbt-build dbt-docs dbt-freshness export
 
 setup:            ## create virtualenv and install dependencies
 	/opt/homebrew/bin/python3.12 -m venv .venv
@@ -76,3 +76,7 @@ dbt-docs:         ## generate and serve the dbt docs site with lineage graph
 
 dbt-freshness:
 	$(DBT) source freshness
+
+# --- Phase 8: publish for Tableau ---
+export:           ## unload dbt marts from Snowflake to exports/*.csv
+	$(PY) -m publishing.export_marts

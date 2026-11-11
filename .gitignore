@@ -18,3 +18,4 @@ terraform.tfvars
 *.tfplan
 build/
 .user.yml
+exports/

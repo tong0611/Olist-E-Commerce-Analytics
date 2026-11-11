@@ -36,7 +36,24 @@ class SnowflakeSettings:
         )
 
 
-def connect(cfg: SnowflakeSettings):
+    @classmethod
+    def transformer_from_env(cls) -> "SnowflakeSettings":
+        """The dbt service user: owns the MARTS schema, used for exports too."""
+        base = cls.loader_from_env()
+        return cls(
+            account=base.account,
+            user=os.getenv("SNOWFLAKE_DBT_USER", "OLIST_DBT_SVC"),
+            private_key_path=str(
+                Path(os.getenv("SNOWFLAKE_DBT_KEY", "~/.snowflake/keys/olist_dbt_rsa_key.p8")).expanduser()
+            ),
+            role="OLIST_TRANSFORMER",
+            warehouse="OLIST_TRANSFORM_WH",
+            database=base.database,
+            lake_bucket=base.lake_bucket,
+        )
+
+
+def connect(cfg: SnowflakeSettings, query_tag: str = "olist-pipeline:loader"):
     import snowflake.connector
 
     return snowflake.connector.connect(
@@ -47,5 +64,5 @@ def connect(cfg: SnowflakeSettings):
         role=cfg.role,
         warehouse=cfg.warehouse,
         database=cfg.database,
-        session_parameters={"QUERY_TAG": "olist-pipeline:loader"},
+        session_parameters={"QUERY_TAG": query_tag},
     )

@@ -9,8 +9,10 @@ customers as (
 zip_codes as (
     select * from {{ ref('int_zip_codes') }}
 ),
+-- latest REVENUE order: a trailing canceled order must not move the clock
+-- (the dataset ends with a few canceled orders weeks after sales stop)
 as_of as (
-    select max(purchase_date) as as_of_date from orders
+    select max(purchase_date) as as_of_date from orders where is_revenue_order
 ),
 
 -- location as of the customer's most recent order

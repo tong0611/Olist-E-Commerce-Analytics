@@ -154,7 +154,7 @@ RAW (VARIANT) ──► STAGING (views)            ──► INTERMEDIATE (views
 |---|---|
 | Customer grain = `customer_unique_id` | `customer_id` is regenerated per order; using it would make every customer look one-time |
 | Revenue = merchandise + freight, excluding `canceled` / `unavailable` | Configurable via `var('non_revenue_statuses')`; tested to tie out across order, item and month grains |
-| Churn = no purchase in 180 days, measured from the latest order in the data | The "simulation clock"; window is `var('churn_window_days')` |
+| Churn = no purchase in 180 days, measured from the latest *revenue* order in the data | The "simulation clock"; trailing canceled orders don't move it. Window is `var('churn_window_days')` |
 | MRR → monthly revenue run rate | Olist has no subscriptions |
 | Marts are full-refresh tables, not incremental | ~100k orders rebuild in seconds; incremental logic would add risk (late-arriving reviews) for no gain at this scale |
 | Geolocation cleaned to Brazil's bounding box, averaged per zip prefix | Raw data has points in other countries and many points per zip |
@@ -174,13 +174,32 @@ RAW (VARIANT) ──► STAGING (views)            ──► INTERMEDIATE (views
 | Total revenue | R$15,735,527.03 (matches the source database to the cent) |
 | Average order value | R$160.23 |
 | Repeat customers | 2,888 (3.0%) · avg CLV R$308 vs R$161 for one-time buyers |
-| Churned (180-day window) | ~71% |
+| Month-1 retention (cohorts ≥ 100, weighted) | 0.45% |
+| Churned (180-day window, as of the last revenue order 2018-09-03) | 60.4% |
 | Top category | Health & Beauty, R$1.44M |
 
 ```bash
 make dbt-deps && make dbt-build     # run + test everything (via scripts/dbt.sh, which loads .env)
 make dbt-docs                       # lineage graph at http://localhost:8081
 ```
+
+## Phase 8: Tableau Public dashboards
+
+Tableau Public can't connect to Snowflake, so the pipeline ends with a **publish step**:
+`publishing/export_marts.py` unloads each dbt mart inside Snowflake (`COPY INTO @~ … SINGLE = TRUE`, gzipped CSV),
+downloads it with one `GET` (retried with backoff), decompresses it atomically into `exports/`, and checks the CSV row
+count against the table. Server-side unload took the export from minutes to about a minute compared with fetching rows through the client.
+
+```bash
+make export        # exports/*.csv + exports/_manifest.json
+```
+
+Dashboards (build steps in [docs/tableau_guide.md](docs/tableau_guide.md)):
+1. **Revenue Overview**: KPIs, monthly trend, new vs returning, MoM growth, revenue by state, payment mix
+2. **Customers & Retention**: CLV by customer type, churn with an adjustable window (parameter), cohort heatmap
+3. **Product Performance**: top categories, units vs revenue, review score vs price, top products
+
+🔗 *Tableau Public link: (to be added)*
 
 ## Project structure
 ```
@@ -199,5 +218,7 @@ make dbt-docs                       # lineage graph at http://localhost:8081
 ├── snowflake/                # account setup SQL template (Phase 5)
 ├── loading/                  # S3 -> Snowflake COPY + reconciliation
 ├── dbt/                      # staging / intermediate / marts models, tests, macros
+├── publishing/               # export marts -> CSV for Tableau Public
+├── docs/                     # progress log, Tableau build guide
 └── tests/                    # pytest: SQLite + moto (no Docker or AWS needed)
 ```
