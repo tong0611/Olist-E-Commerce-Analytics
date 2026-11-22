@@ -93,7 +93,7 @@ raw/_manifests/dt=YYYY-MM-DD/manifest.json        # row counts per table, writte
 | AWS Budget ($10/month) | Email alert at 80% actual or 100% forecasted spend |
 
 
-## Phase 5: Snowflake warehouse
+## Phase 3: Snowflake warehouse
 
 | Object | Details |
 |---|---|
@@ -112,7 +112,7 @@ make sf-bootstrap         # file formats, stage, RAW + AUDIT tables
 make load DATE=2017-11-24
 ```
 
-## Phase 6: dbt transformations
+## Phase 4: dbt transformations
 
 ```
 RAW (VARIANT) ──► STAGING (views)            ──► INTERMEDIATE (views)      ──► MARTS (tables)
@@ -141,7 +141,7 @@ make dbt-deps && make dbt-build     # run + test everything (via scripts/dbt.sh,
 make dbt-docs                       # lineage graph at http://localhost:8081
 ```
 
-## Phase 7: Airflow orchestration
+## Phase 5: Airflow orchestration
 
 The DAG `olist_daily` ([airflow/dags/olist_daily.py](airflow/dags/olist_daily.py)) runs one Olist business date
 end to end: `business_date → extract → load (+ reconciliation) → dbt_build`. 
@@ -154,7 +154,7 @@ make airflow-down
 
 ![Airflow DAG run](docs/img/airflow_dag.png)
 
-## Phase 8: Tableau dashboards
+## Phase 6: Tableau dashboards
 
 🔗 **[View the dashboards on Tableau Public](https://public.tableau.com/app/profile/tong.wang8791/viz/OlistE-CommerceAnalytics_17953182152810/RevenueOverview)**
 
@@ -169,9 +169,6 @@ then switched to extracts and published to Tableau Public. Build steps and expec
 | **Customers & Retention** | Buyers, repeat rate, CLV, churn with an adjustable window (parameter), cohort retention heatmap, recency histogram | Only 3% of customers buy twice; month-1 retention is 0.45%; churn is 60.4% at 180 days |
 | **Product Performance** | Top categories coloured by rating, volume vs value, rating vs price, top products | Health & Beauty leads revenue (R$1.44M); the top 20 products are only 5.2% of revenue (long tail) |
 
-![Revenue Overview](docs/img/revenue_overview.png)
-![Customers & Retention](docs/img/customers_retention.png)
-![Product Performance](docs/img/product_performance.png)
 
 ## Project structure
 ```
