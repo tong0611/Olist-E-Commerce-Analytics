@@ -1,11 +1,9 @@
 """Load the Olist Kaggle CSVs into the Postgres source database.
 
-Usage:
-    python scripts/seed_postgres.py                 # uses data/source/
-    python scripts/seed_postgres.py --csv-dir path/to/csvs
+    python -m scripts.seed_postgres                 # reads data/source/
+    python -m scripts.seed_postgres --csv-dir path/to/csvs
 
-Uses Postgres COPY (fast bulk load). Re-running is safe: every table is
-truncated before it is loaded.
+Bulk-loads with COPY. Safe to re-run: each table is truncated first.
 """
 from __future__ import annotations
 
@@ -16,8 +14,7 @@ from pathlib import Path
 import psycopg2
 from psycopg2 import sql
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from ingestion.config import Settings  # noqa: E402
+from ingestion.config import Settings
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_FILE = PROJECT_ROOT / "sql" / "source" / "schema.sql"
@@ -45,9 +42,7 @@ def load_csv(cur, path: Path, schema: str, table: str) -> int:
     columns = read_header(path)
     cur.execute(sql.SQL("TRUNCATE {}.{}").format(sql.Identifier(schema), sql.Identifier(table)))
     copy_stmt = sql.SQL("COPY {}.{} ({}) FROM STDIN WITH (FORMAT csv, HEADER true)").format(
-        sql.Identifier(schema),
-        sql.Identifier(table),
-        sql.SQL(", ").join(sql.Identifier(c) for c in columns),
+        sql.Identifier(schema), sql.Identifier(table), sql.SQL(", ").join(map(sql.Identifier, columns))
     )
     with path.open(encoding="utf-8-sig") as f:
         cur.copy_expert(copy_stmt.as_string(cur), f)

@@ -1,4 +1,4 @@
-"""Unit tests for the Snowflake loader's pure logic (no Snowflake connection)."""
+"""Loader logic tests (no Snowflake connection)."""
 from __future__ import annotations
 
 from datetime import date
@@ -20,6 +20,7 @@ from loading.load_raw import (
     relative_file,
     tables_to_reconcile,
 )
+from loading.snowflake_client import SnowflakeSettings
 
 COPY_COLS = [("file",), ("status",), ("rows_parsed",), ("rows_loaded",), ("error_limit",),
              ("errors_seen",), ("first_error",)]
@@ -100,3 +101,23 @@ def test_cli_requires_valid_range():
     assert parse_args(["--bootstrap"]).bootstrap
     with pytest.raises(SystemExit):
         parse_args(["--start", "2017-11-26", "--end", "2017-11-20"])
+
+
+def test_date_flag_becomes_a_one_day_range():
+    args = parse_args(["--date", "2017-11-24"])
+    assert (args.start, args.end) == (D1, D1)
+
+
+def test_service_user_settings(monkeypatch):
+    for var in ("USER", "KEY", "ROLE", "WAREHOUSE"):
+        monkeypatch.delenv(f"SNOWFLAKE_LOADER_{var}", raising=False)
+        monkeypatch.delenv(f"SNOWFLAKE_DBT_{var}", raising=False)
+    monkeypatch.setenv("SNOWFLAKE_ACCOUNT", "myorg-acct")
+    loader, dbt = SnowflakeSettings.loader_from_env(), SnowflakeSettings.transformer_from_env()
+    assert (loader.user, loader.role, loader.warehouse) == ("OLIST_LOADER_SVC", "OLIST_LOADER", "OLIST_LOAD_WH")
+    assert (dbt.user, dbt.role, dbt.warehouse) == ("OLIST_DBT_SVC", "OLIST_TRANSFORMER", "OLIST_TRANSFORM_WH")
+    assert dbt.private_key_path.endswith("olist_dbt_rsa_key.p8") and "~" not in dbt.private_key_path
+
+    monkeypatch.delenv("SNOWFLAKE_ACCOUNT")
+    with pytest.raises(ValueError, match="SNOWFLAKE_ACCOUNT"):
+        SnowflakeSettings.loader_from_env()

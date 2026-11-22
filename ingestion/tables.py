@@ -1,65 +1,59 @@
 """What to extract from the source database, and how.
 
-Load modes
-----------
-incremental : only rows belonging to the business date being processed
-              (driven by the order purchase timestamp / review creation date)
-snapshot    : small dimension tables, fully re-extracted every day
-static      : reference data that basically never changes; only extracted
-              when explicitly requested (--include-static)
+incremental  rows for the business date being processed (half-open window [start, end))
+snapshot     small dimensions, re-extracted in full
+static       reference data, extracted only with --include-static
 
-Queries use `{schema}` as a placeholder and `:start` / `:end` bind params
-(half-open window [start, end)), which keeps them portable across Postgres
-and SQLite (used in the unit tests).
+Queries use a `{schema}` placeholder and `:start` / `:end` bind parameters,
+so the same SQL runs on Postgres and on SQLite in the unit tests.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 
-INCREMENTAL = "incremental"
-SNAPSHOT = "snapshot"
-STATIC = "static"
+
+class Mode(StrEnum):
+    INCREMENTAL = "incremental"
+    SNAPSHOT = "snapshot"
+    STATIC = "static"
 
 
 @dataclass(frozen=True)
 class TableSpec:
     name: str
-    mode: str
+    mode: Mode
     query: str
 
 
 _ORDER_WINDOW = "o.order_purchase_timestamp >= :start AND o.order_purchase_timestamp < :end"
 
+
+def _joined_to_orders(table: str, key: str) -> str:
+    return (
+        f"SELECT t.* FROM {{schema}}.{table} t "
+        f"JOIN {{schema}}.orders o ON o.{key} = t.{key} WHERE {_ORDER_WINDOW}"
+    )
+
+
+def _full(table: str) -> str:
+    return f"SELECT * FROM {{schema}}.{table}"
+
+
 TABLES: list[TableSpec] = [
-    TableSpec("orders", INCREMENTAL, f"SELECT o.* FROM {{schema}}.orders o WHERE {_ORDER_WINDOW}"),
-    TableSpec(
-        "order_items",
-        INCREMENTAL,
-        f"SELECT oi.* FROM {{schema}}.order_items oi "
-        f"JOIN {{schema}}.orders o ON o.order_id = oi.order_id WHERE {_ORDER_WINDOW}",
-    ),
-    TableSpec(
-        "order_payments",
-        INCREMENTAL,
-        f"SELECT p.* FROM {{schema}}.order_payments p "
-        f"JOIN {{schema}}.orders o ON o.order_id = p.order_id WHERE {_ORDER_WINDOW}",
-    ),
-    # customer_id is unique per order, so "customers who ordered today" is incremental
-    TableSpec(
-        "customers",
-        INCREMENTAL,
-        f"SELECT c.* FROM {{schema}}.customers c "
-        f"JOIN {{schema}}.orders o ON o.customer_id = c.customer_id WHERE {_ORDER_WINDOW}",
-    ),
-    # Reviews arrive days after the order -> a natural late-arriving data source
+    TableSpec("orders", Mode.INCREMENTAL, f"SELECT o.* FROM {{schema}}.orders o WHERE {_ORDER_WINDOW}"),
+    TableSpec("order_items", Mode.INCREMENTAL, _joined_to_orders("order_items", "order_id")),
+    TableSpec("order_payments", Mode.INCREMENTAL, _joined_to_orders("order_payments", "order_id")),
+    # customer_id is new on every order, so "customers who ordered today" is incremental
+    TableSpec("customers", Mode.INCREMENTAL, _joined_to_orders("customers", "customer_id")),
+    # reviews arrive days after the order: real late-arriving data
     TableSpec(
         "order_reviews",
-        INCREMENTAL,
-        "SELECT r.* FROM {schema}.order_reviews r "
-        "WHERE r.review_creation_date >= :start AND r.review_creation_date < :end",
+        Mode.INCREMENTAL,
+        "SELECT * FROM {schema}.order_reviews WHERE review_creation_date >= :start AND review_creation_date < :end",
     ),
-    TableSpec("products", SNAPSHOT, "SELECT * FROM {schema}.products"),
-    TableSpec("sellers", SNAPSHOT, "SELECT * FROM {schema}.sellers"),
-    TableSpec("product_category_translation", SNAPSHOT, "SELECT * FROM {schema}.product_category_translation"),
-    TableSpec("geolocation", STATIC, "SELECT * FROM {schema}.geolocation"),
+    TableSpec("products", Mode.SNAPSHOT, _full("products")),
+    TableSpec("sellers", Mode.SNAPSHOT, _full("sellers")),
+    TableSpec("product_category_translation", Mode.SNAPSHOT, _full("product_category_translation")),
+    TableSpec("geolocation", Mode.STATIC, _full("geolocation")),
 ]

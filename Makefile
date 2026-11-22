@@ -1,82 +1,87 @@
-PY := .venv/bin/python
-DATE ?= 2017-11-24
+PY    := .venv/bin/python
+DBT   := bash scripts/dbt.sh
+TF    := terraform -chdir=infra/terraform
+DATE  ?= 2017-11-24
 
-.PHONY: setup db-up db-down download seed extract backfill test clean-lake tf-init tf-plan tf-apply s3-check snowflake-render sf-bootstrap load load-range dbt-deps dbt-build dbt-docs dbt-freshness export
+.PHONY: help setup db-up db-down download seed extract backfill load load-range sf-bootstrap snowflake-render \
+        dbt-deps dbt-build dbt-docs export day airflow-up airflow-down test lint tf-init tf-plan tf-apply s3-check
 
-setup:            ## create virtualenv and install dependencies
-	/opt/homebrew/bin/python3.12 -m venv .venv
-	$(PY) -m pip install -q --upgrade pip
-	$(PY) -m pip install -q -r requirements-dev.txt
+help:             ## list targets
+	@grep -E '^[a-z0-9-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-17s %s\n", $$1, $$2}'
+
+# --- local setup -------------------------------------------------------------
+setup:            ## virtualenv, dependencies and .env
+	python3.12 -m venv .venv
+	$(PY) -m pip install -q --upgrade pip -r requirements-dev.txt
 	@test -f .env || cp .env.example .env
 
 db-up:            ## start the Postgres source database
 	docker compose up -d --wait postgres
 
-db-down:
+db-down:          ## stop it (data persists in a Docker volume)
 	docker compose down
 
-download:         ## download Olist CSVs from Kaggle
+download:         ## Olist CSVs from Kaggle -> data/source/
 	bash scripts/download_data.sh
 
-seed:             ## load CSVs into Postgres
-	$(PY) scripts/seed_postgres.py
+seed:             ## CSVs -> Postgres
+	$(PY) -m scripts.seed_postgres
 
-extract:          ## extract one day:  make extract DATE=2017-11-24
+# --- pipeline ----------------------------------------------------------------
+extract:          ## one business date -> lake:   make extract DATE=2017-11-24
 	$(PY) -m ingestion.extract --date $(DATE)
 
-backfill:         ## make backfill START=2017-01-01 END=2017-01-31
+backfill:         ## a range -> lake:             make backfill START=... END=...
 	$(PY) -m ingestion.extract --start $(START) --end $(END) --include-static
 
-test:
-	$(PY) -m pytest -q
-
-clean-lake:
-	rm -rf data/lake
-
-# --- Phase 2: AWS infrastructure ---
-TF := terraform -chdir=infra/terraform
-
-tf-init:
-	$(TF) init
-
-tf-plan:
-	$(TF) plan -out=phase2.tfplan
-
-tf-apply:
-	$(TF) apply phase2.tfplan
-
-s3-check:         ## confirm the pipeline role can write to the lake
-	aws sts get-caller-identity --profile olist-ingestion
-	aws s3 ls s3://$$(terraform -chdir=infra/terraform output -raw lake_bucket)/raw/ --profile olist-ingestion
-
-# --- Phase 5: Snowflake ---
-snowflake-render: ## fill snowflake/01_account_setup.sql -> build/ (paste into Snowsight)
-	$(PY) scripts/render_snowflake_setup.py
-
-sf-bootstrap:     ## create stage + RAW/AUDIT tables
-	$(PY) -m loading.load_raw --bootstrap
-
-load:             ## make load DATE=2017-11-24
+load:             ## lake -> Snowflake RAW + reconciliation:   make load DATE=...
 	$(PY) -m loading.load_raw --date $(DATE)
 
-load-range:       ## make load-range START=2017-11-20 END=2017-11-26
+load-range:       ## make load-range START=... END=...
 	$(PY) -m loading.load_raw --start $(START) --end $(END)
 
-# --- Phase 6: dbt ---
-DBT := bash scripts/dbt.sh
+dbt-build:        ## build and test every dbt model
+	$(DBT) build
+
+day: extract load dbt-build  ## run one business date end to end
+
+export:           ## dbt marts -> exports/*.csv
+	$(PY) -m publishing.export_marts
 
 dbt-deps:
 	$(DBT) deps
 
-dbt-build:        ## run + test every model (fails on any error-severity test)
-	$(DBT) build
+airflow-up:       ## Airflow UI on http://localhost:8080
+	docker compose --profile airflow up -d --build --wait
 
-dbt-docs:         ## generate and serve the dbt docs site with lineage graph
+airflow-down:
+	docker compose --profile airflow down
+
+dbt-docs:         ## dbt docs with lineage graph on :8081
 	$(DBT) docs generate && $(DBT) docs serve --port 8081
 
-dbt-freshness:
-	$(DBT) source freshness
+# --- quality -----------------------------------------------------------------
+test:             ## unit tests (no Docker, AWS or Snowflake needed)
+	$(PY) -m pytest
 
-# --- Phase 8: publish for Tableau ---
-export:           ## unload dbt marts from Snowflake to exports/*.csv
-	$(PY) -m publishing.export_marts
+lint:
+	.venv/bin/ruff check .
+
+# --- one-time infrastructure ---------------------------------------------------
+tf-init:
+	$(TF) init
+
+tf-plan:          ## S3 lake, IAM roles, budget
+	$(TF) plan -out=olist.tfplan
+
+tf-apply:
+	$(TF) apply olist.tfplan
+
+s3-check:         ## confirm the pipeline role can reach the lake
+	aws s3 ls s3://$$($(TF) output -raw lake_bucket)/raw/ --profile olist-ingestion
+
+snowflake-render: ## fill snowflake/01_account_setup.sql -> build/ (run it in Snowsight)
+	$(PY) scripts/render_snowflake_setup.py
+
+sf-bootstrap:     ## stage, RAW and AUDIT tables
+	$(PY) -m loading.load_raw --bootstrap

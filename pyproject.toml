@@ -1,0 +1,13 @@
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+filterwarnings = [
+    # SQLite's default datetime adapter (unit tests only; Postgres in production)
+    "ignore:The default datetime adapter is deprecated:DeprecationWarning",
+]

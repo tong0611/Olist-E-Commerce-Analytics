@@ -1,8 +1,7 @@
-"""S3 storage tests against a mocked AWS (moto) - no real credentials needed."""
+"""S3 storage tests against mocked AWS (moto): no real credentials needed."""
 from __future__ import annotations
 
 import json
-from datetime import date
 
 import boto3
 import pandas as pd
@@ -11,7 +10,7 @@ from moto import mock_aws
 
 from ingestion.extract import manifest_key, run_extract, table_key
 from ingestion.storage import S3Storage
-from tests.test_extract import DAY, engine  # noqa: F401  (reuse the SQLite fixture)
+from tests.conftest import DAY
 
 BUCKET = "test-lake"
 
@@ -39,7 +38,7 @@ def test_missing_bucket_name_is_rejected():
         S3Storage("", "us-east-1")
 
 
-def test_extract_end_to_end_to_s3(s3, engine, tmp_path):  # noqa: F811
+def test_extract_end_to_end_to_s3(s3, engine, tmp_path):
     run_extract(DAY, engine, S3Storage(BUCKET, "us-east-1"), schema="main")
 
     keys = {o["Key"] for o in s3.list_objects_v2(Bucket=BUCKET)["Contents"]}

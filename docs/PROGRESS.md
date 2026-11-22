@@ -7,9 +7,9 @@
 | 1 | Postgres source DB + Python incremental extraction | ✅ |
 | 2 | AWS S3 lake + IAM (Terraform) | ✅ |
 | 5 | Snowflake: storage integration, RAW loads, reconciliation | ✅ |
-| 6 | dbt: 22 models, 105 tests | ✅ |
+| 6 | dbt: 22 models, 83 tests | ✅ |
 | 8 | **Tableau** dashboards (switched from Power BI: no Windows machine) | ✅ [published](https://public.tableau.com/app/profile/tong.wang8791/viz/OlistE-CommerceAnalytics_17953182152810/RevenueOverview) |
-| 7 | Airflow daily DAG | ⬜ |
+| 7 | Airflow daily DAG | ✅ |
 | 3 | Lambda real-time order events | ⬜ |
 | 4 | Glue raw → processed | ⬜ |
 | 9 | CI (GitHub Actions) + monitoring | ⬜ |
@@ -20,7 +20,7 @@ Build order was changed to get an end-to-end pipeline with dashboards first:
 ## Data currently loaded
 - Full Olist history (2016-09-04 .. 2018-10-17, 774 business dates) extracted to S3 and loaded into Snowflake.
 - 3,156 table-day reconciliation checks: all MATCH.
-- `dbt build`: 103 pass, 2 intended warnings (256 payment/value mismatches, 8 delivered orders without a date).
+- `dbt build` (22 models + 83 tests): 103 pass, 2 intended warnings (256 payment/value mismatches, 8 delivered orders without a date).
 - Total revenue R$15,735,527.03 · 99,441 orders · 96,096 customers · AOV R$160.23. All tie to the source DB.
 
 ## Phase 8 progress
@@ -38,15 +38,23 @@ Build order was changed to get an end-to-end pipeline with dashboards first:
 - ⬜ Export dashboard images to `docs/img/` (README already references them)
 - ⬜ Optional polish: Top Categories shows 25 bars with overlapping labels (consider Top 15); set Revenue Overview as the default tab
 
+## Phase 7
+- ✅ `airflow/dags/olist_daily.py`: business_date → extract → load + reconcile → dbt build; replays Olist 9 years behind
+  real time (2026-11-24 → 2017-11-24); manual runs take a `business_date` param
+- ✅ Airflow 3.3.2 in Docker (`make airflow-up`, UI on :8080); pipeline in its own venv inside the image
+- ✅ Test run for 2017-11-24: success in 56 s, marts unchanged (99,441 orders, R$15,735,527.03)
+- The DAG is **paused**; unpause in the UI to run daily at 00:00 UTC
+
 ## Next
-Phase 7 (Airflow): one DAG running extract → load → dbt build → export for each business date.
+Phase 9 (CI): GitHub Actions running lint, unit tests and `dbt compile`. Then optionally Lambda (3) and Glue (4).
 
 ## Resuming the environment
 ```bash
 cd olist-ecommerce-pipeline
 open -a Docker                 # then wait for the whale icon to settle
 make db-up                     # Postgres source DB (data persists in the Docker volume)
-make test                      # 28 Python tests
+make test                      # 31 Python tests
+make airflow-up                # Airflow UI on http://localhost:8080
 make dbt-build                 # rebuild + test marts in Snowflake (warehouse auto-resumes)
 ```
 Snowflake warehouses auto-suspend after 60s, so nothing bills while idle. The Snowflake trial ends ~2026-12-10.

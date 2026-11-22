@@ -65,7 +65,8 @@ def test_unload_statement():
 
 
 def test_get_statement_quotes_paths_with_spaces():
-    assert get_statement("dim_date", Path("/tmp/my dir")) == "GET @~/olist_exports/dim_date.csv.gz 'file:///tmp/my dir/'"
+    expected = "GET @~/olist_exports/dim_date.csv.gz 'file:///tmp/my dir/'"
+    assert get_statement("dim_date", Path("/tmp/my dir")) == expected
 
 
 def test_count_csv_rows_handles_quoted_newlines(tmp_path):

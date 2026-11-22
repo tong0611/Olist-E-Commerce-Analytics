@@ -1,5 +1,5 @@
-# Local "production" source database for the Olist store.
 services:
+  # The Olist store's operational database (the pipeline's source).
   postgres:
     image: postgres:16
     container_name: olist-postgres
@@ -16,5 +16,53 @@ services:
       interval: 5s
       retries: 10
 
+  # Airflow's own metadata database (run history, task state).
+  airflow-db:
+    image: postgres:16
+    profiles: [airflow]
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+    volumes:
+      - airflow-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      retries: 10
+
+  # Scheduler, DAG processor and web UI in one container (local use).
+  airflow:
+    build:
+      context: .
+      dockerfile: airflow/Dockerfile
+    image: olist-airflow
+    profiles: [airflow]
+    command: standalone
+    depends_on:
+      postgres: { condition: service_healthy }
+      airflow-db: { condition: service_healthy }
+    ports:
+      - "8080:8080"
+    env_file: .env
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db/airflow
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/olist/airflow/dags
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"  # local only: no login screen
+      # the pipeline, from inside the container
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      SNOWFLAKE_LOADER_KEY: /home/airflow/.snowflake/keys/olist_loader_rsa_key.p8
+      SNOWFLAKE_DBT_KEY: /home/airflow/.snowflake/keys/olist_dbt_rsa_key.p8
+      DBT_TARGET_PATH: /tmp/dbt/target
+      DBT_LOG_PATH: /tmp/dbt/logs
+    volumes:
+      - .:/opt/olist
+      - ~/.aws:/home/airflow/.aws:ro
+      - ~/.snowflake/keys:/home/airflow/.snowflake/keys:ro
+
 volumes:
   pgdata:
+  airflow-db:

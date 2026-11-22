@@ -38,7 +38,7 @@ Airflow will map its run date to an Olist date so the daily schedule replays the
 | 4 | Glue: raw → processed (cleaning, dedupe, typing, category translation) | ⬜ |
 | 5 | Snowflake: storage integration, stage, RAW tables, `COPY INTO`, reconciliation | ✅ done |
 | 6 | dbt: staging → intermediate → marts, 105 tests, docs | ✅ done |
-| 7 | Airflow: daily DAG, retries, SLAs, alerting | ⬜ |
+| 7 | Airflow: daily DAG (extract → load + reconcile → dbt build), retries, timeouts | ✅ done |
 | 8 | Tableau: Revenue, Customers & Retention, Products dashboards ([live on Tableau Public](https://public.tableau.com/app/profile/tong.wang8791/viz/OlistE-CommerceAnalytics_17953182152810/RevenueOverview)) | ✅ done |
 | 9 | CI (GitHub Actions: pytest + `dbt build`), data quality monitoring page | ⬜ |
 
@@ -183,6 +183,25 @@ make dbt-deps && make dbt-build     # run + test everything (via scripts/dbt.sh,
 make dbt-docs                       # lineage graph at http://localhost:8081
 ```
 
+## Phase 7: Airflow orchestration
+
+The DAG `olist_daily` ([airflow/dags/olist_daily.py](airflow/dags/olist_daily.py)) runs one Olist business date
+end to end: `business_date → extract → load (+ reconciliation) → dbt_build`. It replays the store nine years behind
+real time, so the run on 2026-11-24 processes Black Friday 2017. Triggering it with a `business_date` runs any day
+by hand. Each task retries twice and times out after 30 minutes, and dates outside the dataset are skipped.
+
+Airflow 3 runs locally in Docker next to the source database. The pipeline gets its own virtualenv inside the
+image, so dbt and the Snowflake connector never clash with Airflow's dependencies, and AWS and Snowflake
+credentials are mounted read-only at run time rather than baked into the image. Re-running a day is safe:
+a full run for 2017-11-24 took 56 seconds and left the marts unchanged to the cent.
+
+```bash
+make airflow-up       # UI on http://localhost:8080 (local only, no login)
+make airflow-down
+```
+
+![Airflow DAG run](docs/img/airflow_dag.png)
+
 ## Phase 8: Tableau dashboards
 
 🔗 **[View the dashboards on Tableau Public](https://public.tableau.com/app/profile/tong.wang8791/viz/OlistE-CommerceAnalytics_17953182152810/RevenueOverview)**
@@ -230,6 +249,7 @@ make export        # exports/*.csv + exports/_manifest.json
 ├── snowflake/                # account setup SQL template (Phase 5)
 ├── loading/                  # S3 -> Snowflake COPY + reconciliation
 ├── dbt/                      # staging / intermediate / marts models, tests, macros
+├── airflow/                  # daily DAG + Docker image
 ├── publishing/               # export marts -> CSV for Tableau Public
 ├── docs/                     # progress log, Tableau build guide
 └── tests/                    # pytest: SQLite + moto (no Docker or AWS needed)

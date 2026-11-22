@@ -1,23 +1,12 @@
-"""Export the dbt MARTS tables from Snowflake to CSV for Tableau Public.
-
-Tableau Public can't connect to Snowflake, so the last pipeline step
-"publishes" the marts as files. Run after `dbt build` succeeds.
+"""Export the dbt marts from Snowflake to CSV, for tools without a Snowflake connector.
 
     python -m publishing.export_marts                  # -> exports/
     python -m publishing.export_marts --out-dir /tmp/x
 
-How: each table is UNLOADED inside Snowflake (`COPY INTO @~` -> one gzipped
-CSV in the service user's stage), then downloaded with a single GET and
-decompressed. Fetching result sets row-by-row through the client is far
-slower (many small result chunks); server-side unload is the standard way
-to move data out of a warehouse.
-
-Output:
-    exports/<table>.csv          lower-case headers, ISO dates, NULL = empty
-    exports/_manifest.json       row counts, columns and export time per file
-
-Files are swapped in atomically, and the row count in every CSV is checked
-against the table in Snowflake.
+Each table is unloaded inside Snowflake (`COPY INTO @~`, one gzipped CSV), downloaded
+with a single GET and decompressed. That is far faster than fetching rows through the
+client. Files are swapped in atomically and every CSV's row count is checked against
+the table. Writes exports/<table>.csv and exports/_manifest.json.
 """
 from __future__ import annotations
 
@@ -29,32 +18,20 @@ import logging
 import shutil
 import tempfile
 import time
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Optional, TypeVar
 
 from loading.snowflake_client import SnowflakeSettings, connect
 
-log = logging.getLogger("publishing.export_marts")
-T = TypeVar("T")
+log = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 STAGE_DIR = "@~/olist_exports"
 
-# What each dashboard uses:
-#   Revenue overview      -> mart_revenue_monthly, fct_orders
-#   Customers & retention -> dim_customers, mart_customer_cohorts
-#   Products              -> mart_product_performance, fct_order_items, dim_products, dim_sellers
 MARTS = [
-    "fct_orders",
-    "fct_order_items",
-    "dim_customers",
-    "dim_products",
-    "dim_sellers",
-    "dim_date",
-    "mart_revenue_monthly",
-    "mart_customer_cohorts",
-    "mart_product_performance",
+    "fct_orders", "fct_order_items", "dim_customers", "dim_products", "dim_sellers", "dim_date",
+    "mart_revenue_monthly", "mart_customer_cohorts", "mart_product_performance",
 ]
 
 
@@ -83,20 +60,17 @@ def get_statement(table: str, local_dir: Path) -> str:
     return f"GET {STAGE_DIR}/{table}.csv.gz 'file://{local_dir.as_posix()}/'"
 
 
-def with_retries(fn: Callable[[], T], what: str, attempts: int = 4, base_delay: float = 2.0,
+def with_retries[T](fn: Callable[[], T], what: str, attempts: int = 4, base_delay: float = 2.0,
                  sleep: Callable[[float], None] = time.sleep) -> T:
-    """Retry transient failures (e.g. a stalled download from Snowflake's
-    result storage) with exponential backoff: 2s, 4s, 8s."""
-    for attempt in range(1, attempts + 1):
+    """Retry transient failures (e.g. a stalled GET) with exponential backoff: 2s, 4s, 8s."""
+    for attempt in range(1, attempts):
         try:
             return fn()
-        except Exception as exc:  # connector raises OperationalError for network stalls
-            if attempt == attempts:
-                raise
+        except Exception as exc:  # the connector raises OperationalError on network stalls
             delay = base_delay * 2 ** (attempt - 1)
-            log.warning("%s failed (attempt %d/%d): %s - retrying in %.0fs", what, attempt, attempts, exc, delay)
+            log.warning("%s failed (attempt %d/%d): %s; retrying in %.0fs", what, attempt, attempts, exc, delay)
             sleep(delay)
-    raise AssertionError("unreachable")
+    return fn()
 
 
 def count_csv_rows(path: Path) -> int:
@@ -132,7 +106,7 @@ def export_table(conn, table: str, out_dir: Path, download_dir: Path) -> dict:
 
 def run_export(conn, out_dir: Path, tables: list[str] = MARTS) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
-    manifest = {"exported_at": datetime.now(timezone.utc).isoformat(), "tables": {}}
+    manifest = {"exported_at": datetime.now(UTC).isoformat(), "tables": {}}
     with tempfile.TemporaryDirectory(prefix="olist_export_") as tmp:
         for t in tables:
             info = export_table(conn, t, out_dir, Path(tmp))
@@ -142,9 +116,9 @@ def run_export(conn, out_dir: Path, tables: list[str] = MARTS) -> dict:
     return manifest
 
 
-def main(argv: Optional[list[str]] = None) -> None:
+def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    logging.getLogger("snowflake").setLevel(logging.WARNING)
+    logging.getLogger("snowflake").setLevel(logging.ERROR)
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--out-dir", type=Path, default=PROJECT_ROOT / "exports")
     args = p.parse_args(argv)

@@ -1,24 +1,18 @@
-"""Load raw Parquet files from the S3 lake into Snowflake OLIST.RAW, then
-reconcile loaded row counts against the extraction manifests.
+"""Load raw Parquet from the S3 lake into Snowflake OLIST.RAW, then reconcile
+loaded row counts against the extraction manifests.
 
-Examples:
-    python -m loading.load_raw --bootstrap                 # create stage / tables (idempotent)
+    python -m loading.load_raw --bootstrap                 # stage, RAW and AUDIT tables (idempotent)
     python -m loading.load_raw --date 2017-11-24
-    python -m loading.load_raw --start 2016-09-04 --end 2018-10-17   # backfill
+    python -m loading.load_raw --start 2016-09-04 --end 2018-10-17
 
-Design
-------
-* ELT: every RAW table is (RAW_DATA VARIANT + file metadata). Typing and
-  cleaning happen in dbt staging, so source schema drift never breaks a load.
-* The manifests (written last by the extractor) say exactly which files
-  exist, so each table gets ONE `COPY ... FILES = (...)` for the whole date
-  range instead of one COPY per day.
-* COPY INTO keeps 64 days of load metadata per file, so re-running a date
-  does not duplicate data. A re-extracted (overwritten) file has a new ETag
-  and IS reloaded -> dbt staging dedupes on the latest file version.
-* Reconciliation: rows in RAW for each manifest's batch_id must equal that
-  manifest's row count, per table. Mismatches fail the run; every check is
-  logged to AUDIT.LOAD_RECONCILIATION.
+* RAW tables hold the whole record as VARIANT plus file metadata; typing happens
+  in dbt, so source schema changes never break a load.
+* The manifests list exactly which files exist, so each table gets one
+  `COPY ... FILES = (...)` for the whole date range.
+* COPY's load metadata makes re-runs no-ops. A re-extracted file has a new ETag
+  and is loaded again; dbt staging keeps the latest version.
+* Rows in RAW for each manifest's batch_id must equal the manifest's count.
+  Every check goes to AUDIT.LOAD_RECONCILIATION and a mismatch fails the run.
 """
 from __future__ import annotations
 
@@ -27,97 +21,82 @@ import json
 import logging
 import re
 from collections import defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import date, timedelta
-from typing import Iterable, Optional
+from datetime import date
 
+from ingestion.dates import add_date_args, daterange, resolve_date_range
 from ingestion.tables import TABLES
 from loading.snowflake_client import SnowflakeSettings, connect
 
-log = logging.getLogger("loading.load_raw")
+log = logging.getLogger(__name__)
 
 STAGE = "RAW.LAKE_STAGE"
-MAX_FILES_PER_COPY = 1000  # Snowflake limit for the FILES option
+MAX_FILES_PER_COPY = 1000  # Snowflake's limit for FILES = (...)
 
 
 def bootstrap_statements(lake_bucket: str) -> list[str]:
     if not lake_bucket:
         raise ValueError("S3_BUCKET must be set to create the stage")
-    stmts = [
+    raw_tables = [
+        f"""CREATE TABLE IF NOT EXISTS RAW.{spec.name.upper()} (
+              RAW_DATA VARIANT, _SOURCE_FILE STRING, _FILE_ROW_NUMBER NUMBER,
+              _FILE_LAST_MODIFIED TIMESTAMP_NTZ, _LOADED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP())"""
+        for spec in TABLES
+    ]
+    return [
         "CREATE FILE FORMAT IF NOT EXISTS RAW.FF_PARQUET TYPE = PARQUET USE_LOGICAL_TYPE = TRUE",
         "CREATE FILE FORMAT IF NOT EXISTS RAW.FF_JSON TYPE = JSON",
-        f"""CREATE STAGE IF NOT EXISTS {STAGE}
-              URL = 's3://{lake_bucket}/raw/'
-              STORAGE_INTEGRATION = OLIST_S3_LAKE
-              FILE_FORMAT = RAW.FF_PARQUET""",
-    ]
-    for spec in TABLES:
-        stmts.append(
-            f"""CREATE TABLE IF NOT EXISTS RAW.{spec.name.upper()} (
-                  RAW_DATA            VARIANT,
-                  _SOURCE_FILE        STRING,
-                  _FILE_ROW_NUMBER    NUMBER,
-                  _FILE_LAST_MODIFIED TIMESTAMP_NTZ,
-                  _LOADED_AT          TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP()
-                )"""
-        )
-    stmts += [
+        f"""CREATE STAGE IF NOT EXISTS {STAGE} URL = 's3://{lake_bucket}/raw/'
+              STORAGE_INTEGRATION = OLIST_S3_LAKE FILE_FORMAT = RAW.FF_PARQUET""",
+        *raw_tables,
         """CREATE TABLE IF NOT EXISTS AUDIT.COPY_HISTORY (
-             BUSINESS_DATE DATE, TABLE_NAME STRING, FILE STRING, STATUS STRING,
-             ROWS_PARSED NUMBER, ROWS_LOADED NUMBER, FIRST_ERROR STRING,
-             COPIED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP())""",
+             BUSINESS_DATE DATE, TABLE_NAME STRING, FILE STRING, STATUS STRING, ROWS_PARSED NUMBER,
+             ROWS_LOADED NUMBER, FIRST_ERROR STRING, COPIED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP())""",
         """CREATE TABLE IF NOT EXISTS AUDIT.LOAD_RECONCILIATION (
-             BUSINESS_DATE DATE, BATCH_ID STRING, TABLE_NAME STRING,
-             EXPECTED_ROWS NUMBER, LOADED_ROWS NUMBER, STATUS STRING,
-             CHECKED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP())""",
+             BUSINESS_DATE DATE, BATCH_ID STRING, TABLE_NAME STRING, EXPECTED_ROWS NUMBER,
+             LOADED_ROWS NUMBER, STATUS STRING, CHECKED_AT TIMESTAMP_LTZ DEFAULT CURRENT_TIMESTAMP())""",
     ]
-    return stmts
 
 
 def relative_file(table: str, business_date: date) -> str:
-    """File path relative to @STAGE/olist/<table>/ (matches ingestion.extract.table_key)."""
+    """Path under @STAGE/olist/<table>/ (matches ingestion.extract.table_key)."""
     return f"dt={business_date.isoformat()}/{table}.parquet"
 
 
-def business_date_from_path(path: Optional[str]) -> Optional[str]:
+def business_date_from_path(path: str | None) -> str | None:
     """'s3://.../orders/dt=2017-11-24/orders.parquet' -> '2017-11-24'"""
     m = re.search(r"dt=(\d{4}-\d{2}-\d{2})", path or "")
-    return m.group(1) if m else None
+    return m and m.group(1)
 
 
 def copy_statement(table: str, files: list[str]) -> str:
     file_list = ", ".join(f"'{f}'" for f in files)
     return f"""
         COPY INTO RAW.{table.upper()} (RAW_DATA, _SOURCE_FILE, _FILE_ROW_NUMBER, _FILE_LAST_MODIFIED)
-        FROM (
-            SELECT $1, METADATA$FILENAME, METADATA$FILE_ROW_NUMBER, METADATA$FILE_LAST_MODIFIED
-            FROM @{STAGE}/olist/{table}/
-        )
+        FROM (SELECT $1, METADATA$FILENAME, METADATA$FILE_ROW_NUMBER, METADATA$FILE_LAST_MODIFIED
+              FROM @{STAGE}/olist/{table}/)
         FILES = ({file_list})
         ON_ERROR = ABORT_STATEMENT"""
 
 
 @dataclass
 class CopyResult:
-    file: Optional[str]
+    file: str
     status: str
-    rows_parsed: int = 0
-    rows_loaded: int = 0
-    first_error: Optional[str] = None
+    rows_parsed: int
+    rows_loaded: int
+    first_error: str | None
 
 
 def parse_copy_results(description, rows) -> list[CopyResult]:
-    """COPY returns one row per file, or a single 'status' row when there was
-    nothing new to load ("Copy executed with 0 files processed.")."""
+    """One row per file, or a single 'status' row when nothing was new."""
     cols = [d[0].lower() for d in description]
     if "file" not in cols:
         return []
-    out = []
-    for row in rows:
-        r = dict(zip(cols, row))
-        out.append(CopyResult(r["file"], r["status"], r.get("rows_parsed") or 0,
-                              r.get("rows_loaded") or 0, r.get("first_error")))
-    return out
+    records = (dict(zip(cols, row, strict=True)) for row in rows)
+    return [CopyResult(r["file"], r["status"], r.get("rows_parsed") or 0, r.get("rows_loaded") or 0,
+                       r.get("first_error")) for r in records]
 
 
 @dataclass
@@ -134,7 +113,7 @@ class Reconciliation:
 
 
 def tables_to_reconcile(manifest: dict) -> list[tuple[str, int]]:
-    """Tables the manifest says have data for this batch."""
+    """(table, rows) for every table the manifest says has data."""
     return [(name, t["rows"]) for name, t in manifest["tables"].items() if t["rows"] > 0]
 
 
@@ -148,30 +127,22 @@ def files_by_table(manifests: dict[date, dict]) -> dict[str, list[str]]:
 
 def reconcile(manifests: dict[date, dict], counts: dict[str, dict[str, int]]) -> list[Reconciliation]:
     """counts: table -> {batch_id: rows in RAW}"""
-    checks = []
-    for d, m in sorted(manifests.items()):
-        for name, expected in tables_to_reconcile(m):
-            loaded = counts.get(name, {}).get(m["batch_id"], 0)
-            checks.append(Reconciliation(d, m["batch_id"], name, expected, loaded))
-    return checks
+    return [
+        Reconciliation(d, m["batch_id"], name, expected, counts.get(name, {}).get(m["batch_id"], 0))
+        for d, m in sorted(manifests.items())
+        for name, expected in tables_to_reconcile(m)
+    ]
 
 
-def chunks(items: list, size: int) -> Iterable[list]:
+def chunks(items: list, size: int) -> Iterator[list]:
     for i in range(0, len(items), size):
         yield items[i:i + size]
 
 
 def read_manifests(cur, start: date, end: date) -> dict[date, dict]:
-    cur.execute(
-        f"SELECT $1 FROM @{STAGE}/_manifests/ (FILE_FORMAT => 'RAW.FF_JSON', PATTERN => '.*manifest[.]json')"
-    )
-    out = {}
-    for (raw,) in cur.fetchall():
-        m = json.loads(raw)
-        d = date.fromisoformat(m["business_date"])
-        if start <= d <= end:
-            out[d] = m
-    return out
+    cur.execute(f"SELECT $1 FROM @{STAGE}/_manifests/ (FILE_FORMAT => 'RAW.FF_JSON', PATTERN => '.*manifest[.]json')")
+    manifests = (json.loads(raw) for (raw,) in cur.fetchall())
+    return {d: m for m in manifests if start <= (d := date.fromisoformat(m["business_date"])) <= end}
 
 
 def load_range(conn, start: date, end: date) -> list[Reconciliation]:
@@ -182,73 +153,59 @@ def load_range(conn, start: date, end: date) -> list[Reconciliation]:
         raise RuntimeError(f"{len(missing)} date(s) have no manifest (extraction not finished), e.g. {missing[:3]}")
     log.info("found %d manifest(s) for %s .. %s", len(manifests), start, end)
 
-    for name, files in files_by_table(manifests).items():
-        loaded_files = loaded_rows = 0
-        for batch in chunks(files, MAX_FILES_PER_COPY):
+    files = files_by_table(manifests)
+    for name, table_files in files.items():
+        results: list[CopyResult] = []
+        for batch in chunks(table_files, MAX_FILES_PER_COPY):
             cur.execute(copy_statement(name, batch))
-            results = parse_copy_results(cur.description, cur.fetchall())
-            loaded_files += sum(r.status == "LOADED" for r in results)
-            loaded_rows += sum(r.rows_loaded for r in results)
-            if results:
-                # plain values only: Snowflake rejects expressions in multi-row VALUES
-                cur.executemany(
-                    "INSERT INTO AUDIT.COPY_HISTORY (BUSINESS_DATE, TABLE_NAME, FILE, STATUS, ROWS_PARSED, ROWS_LOADED, FIRST_ERROR) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                    [(business_date_from_path(r.file), name, r.file, r.status, r.rows_parsed, r.rows_loaded, r.first_error)
-                     for r in results],
-                )
-        log.info("%-30s %4d file(s) in range, %4d newly loaded, %9d rows", name, len(files), loaded_files, loaded_rows)
+            results += parse_copy_results(cur.description, cur.fetchall())
+        if results:
+            cur.executemany(
+                "INSERT INTO AUDIT.COPY_HISTORY "
+                "(BUSINESS_DATE, TABLE_NAME, FILE, STATUS, ROWS_PARSED, ROWS_LOADED, FIRST_ERROR) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                [(business_date_from_path(r.file), name, r.file, r.status, r.rows_parsed, r.rows_loaded,
+                  r.first_error) for r in results],
+            )
+        log.info("%-30s %4d file(s), %4d newly loaded, %9d rows", name, len(table_files),
+                 sum(r.status == "LOADED" for r in results), sum(r.rows_loaded for r in results))
 
-    counts: dict[str, dict[str, int]] = {}
-    for name in files_by_table(manifests):
+    counts = {}
+    for name in files:
         cur.execute(f"SELECT RAW_DATA:_batch_id::STRING, COUNT(*) FROM RAW.{name.upper()} GROUP BY 1")
         counts[name] = dict(cur.fetchall())
 
     checks = reconcile(manifests, counts)
     cur.executemany(
-        "INSERT INTO AUDIT.LOAD_RECONCILIATION (BUSINESS_DATE, BATCH_ID, TABLE_NAME, EXPECTED_ROWS, LOADED_ROWS, STATUS) "
-        "VALUES (%s, %s, %s, %s, %s, %s)",
+        "INSERT INTO AUDIT.LOAD_RECONCILIATION "
+        "(BUSINESS_DATE, BATCH_ID, TABLE_NAME, EXPECTED_ROWS, LOADED_ROWS, STATUS) VALUES (%s, %s, %s, %s, %s, %s)",
         [(c.business_date.isoformat(), c.batch_id, c.table, c.expected, c.loaded, c.status) for c in checks],
     )
     return checks
 
 
-def daterange(start: date, end: date) -> Iterable[date]:
-    d = start
-    while d <= end:
-        yield d
-        d += timedelta(days=1)
-
-
-def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    g = p.add_mutually_exclusive_group(required=True)
-    g.add_argument("--bootstrap", action="store_true", help="create file formats, stage, RAW/AUDIT tables")
-    g.add_argument("--date", type=date.fromisoformat)
-    g.add_argument("--start", type=date.fromisoformat)
-    p.add_argument("--end", type=date.fromisoformat)
-    args = p.parse_args(argv)
-    if args.start and (not args.end or args.end < args.start):
-        p.error("--start needs an --end on or after it")
-    return args
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument("--bootstrap", action="store_true", help="create file formats, stage, RAW and AUDIT tables")
+    add_date_args(p, group)
+    return resolve_date_range(p, p.parse_args(argv))
 
 
-def main(argv: Optional[list[str]] = None) -> None:
+def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    logging.getLogger("snowflake").setLevel(logging.WARNING)
+    logging.getLogger("snowflake").setLevel(logging.ERROR)
     args = parse_args(argv)
     cfg = SnowflakeSettings.loader_from_env()
 
-    with connect(cfg) as conn:
+    with connect(cfg, query_tag="olist-pipeline:loader") as conn:
         if args.bootstrap:
-            cur = conn.cursor()
             for stmt in bootstrap_statements(cfg.lake_bucket):
-                cur.execute(stmt)
-            log.info("bootstrap complete: stage %s and %d RAW tables ready", STAGE, len(TABLES))
+                conn.cursor().execute(stmt)
+            log.info("bootstrap complete: stage %s and %d RAW tables", STAGE, len(TABLES))
             return
 
-        start, end = (args.date, args.date) if args.date else (args.start, args.end)
-        checks = load_range(conn, start, end)
+        checks = load_range(conn, args.start, args.end)
         failures = [c for c in checks if c.status != "MATCH"]
         for c in failures:
             log.error("MISMATCH %s %-28s expected %8d loaded %8d", c.business_date, c.table, c.expected, c.loaded)
