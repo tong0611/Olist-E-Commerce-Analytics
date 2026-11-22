@@ -3,7 +3,7 @@
 An end-to-end data engineering pipeline built on the
 [Olist Brazilian E-Commerce dataset](https://www.kaggle.com/datasets/olistbr/brazilian-ecommerce)
 (~100k orders, 2016–2018). It ingests orders, customers, products, payments and reviews,
-lands them in an S3 data lake, transforms them with Glue and dbt, models them in Snowflake,
+lands them in an S3 data lake, loads them into Snowflake, models them with dbt,
 and publishes revenue, retention and product dashboards to Tableau Public. Airflow runs it daily.
 
 ## Architecture
@@ -11,22 +11,18 @@ and publishes revenue, retention and product dashboards to Tableau Public. Airfl
 ```mermaid
 flowchart LR
     A[Olist CSVs<br/>Kaggle] -->|seed| B[(Postgres<br/>source OLTP)]
-    B -->|Python incremental<br/>extract| C[S3 raw/<br/>Parquet]
-    E[Order event<br/>simulator] -->|JSON events| L[Lambda<br/>validate]
-    L --> C
-    L -->|bad events| Q[S3 quarantine/]
-    C -->|Glue PySpark| D[S3 processed/]
-    D -->|COPY INTO| F[(Snowflake RAW)]
+    B -->|Python incremental<br/>extract| C[S3 raw/<br/>Parquet + manifests]
+    C -->|COPY INTO<br/>+ reconciliation| F[(Snowflake RAW)]
     F -->|dbt| G[(Snowflake<br/>STAGING → MARTS)]
     G -->|live connection<br/>→ extracts| H[Tableau Public]
-    AF[Airflow daily DAG] -.orchestrates.-> B & C & D & F & G
+    AF[Airflow daily DAG] -.orchestrates.-> C & F & G
 ```
 
 ### Simulating a live store
 The dataset is historical, so each pipeline run processes one **business date** of Olist
 history: `--date 2017-11-24` extracts that day's orders, items, payments and customers,
 plus reviews created that day (they arrive *after* the order, so they're real late-arriving data).
-Airflow will map its run date to an Olist date so the daily schedule replays the store.
+Airflow maps each run date to the Olist date nine years earlier, so the daily schedule replays the store.
 
 ## Roadmap
 
@@ -35,7 +31,7 @@ Airflow will map its run date to an Olist date so the daily schedule replays the
 | 1 | Postgres source DB, Python incremental extraction → data lake (local / S3), manifests, tests |
 | 2 | AWS: S3 bucket and IAM (Terraform), run extraction against S3 | 
 | 3 | Snowflake: storage integration, stage, RAW tables, `COPY INTO`, reconciliation | 
-| 4 | dbt: staging → intermediate → marts, 105 tests, docs |
+| 4 | dbt: staging → intermediate → marts, 83 tests, docs |
 | 5 | Airflow: daily DAG (extract → load + reconcile → dbt build), retries, timeouts | 
 | 6 | Tableau: Revenue, Customers & Retention, Products dashboards ([live on Tableau Public](https://public.tableau.com/app/profile/tong.wang8791/viz/OlistE-CommerceAnalytics_17953182152810/RevenueOverview)) | 
 
@@ -85,7 +81,7 @@ raw/_manifests/dt=YYYY-MM-DD/manifest.json        # row counts per table, writte
 
 | Resource | Why |
 |---|---|
-| S3 bucket `olist-pipeline-lake-<account_id>` | Data lake (`raw/`, `processed/`, `quarantine/`) |
+| S3 bucket `olist-pipeline-lake-<account_id>` | Data lake: `raw/` (prefixes `processed/` and `quarantine/` reserved for later stages) |
 | Public access block, ACLs disabled, TLS-only bucket policy | Nothing in the lake is ever public or sent unencrypted |
 | Versioning + SSE-S3 encryption | Recover from bad overwrites; encrypted at rest at no cost |
 | Lifecycle rules | Old versions expire after 30 days, raw files over 128 KB move to Standard-IA after 90 days, quarantine expires after 90 days |
