@@ -30,17 +30,15 @@ Airflow will map its run date to an Olist date so the daily schedule replays the
 
 ## Roadmap
 
-| Phase | Scope | Status |
-|---|---|---|
-| 1 | Postgres source DB, Python incremental extraction → data lake (local / S3), manifests, tests | ✅ done |
-| 2 | AWS: S3 bucket and IAM (Terraform), run extraction against S3 | ✅ done |
-| 3 | Lambda: real-time order events → validate → raw / quarantine | ⬜ |
-| 4 | Glue: raw → processed (cleaning, dedupe, typing, category translation) | ⬜ |
-| 5 | Snowflake: storage integration, stage, RAW tables, `COPY INTO`, reconciliation | ✅ done |
-| 6 | dbt: staging → intermediate → marts, 105 tests, docs | ✅ done |
-| 7 | Airflow: daily DAG (extract → load + reconcile → dbt build), retries, timeouts | ✅ done |
-| 8 | Tableau: Revenue, Customers & Retention, Products dashboards ([live on Tableau Public](https://public.tableau.com/app/profile/tong.wang8791/viz/OlistE-CommerceAnalytics_17953182152810/RevenueOverview)) | ✅ done |
-| 9 | CI (GitHub Actions: pytest + `dbt build`), data quality monitoring page | ⬜ |
+| Phase | Scope |
+|---|---|
+| 1 | Postgres source DB, Python incremental extraction → data lake (local / S3), manifests, tests |
+| 2 | AWS: S3 bucket and IAM (Terraform), run extraction against S3 | 
+| 3 | Snowflake: storage integration, stage, RAW tables, `COPY INTO`, reconciliation | 
+| 4 | dbt: staging → intermediate → marts, 105 tests, docs |
+| 5 | Airflow: daily DAG (extract → load + reconcile → dbt build), retries, timeouts | 
+| 6 | Tableau: Revenue, Customers & Retention, Products dashboards ([live on Tableau Public](https://public.tableau.com/app/profile/tong.wang8791/viz/OlistE-CommerceAnalytics_17953182152810/RevenueOverview)) | 
+
 
 ## Dashboard metrics
 | Metric | Definition |
@@ -52,7 +50,6 @@ Airflow will map its run date to an Olist date so the daily schedule replays the
 | Top-selling products | Units and revenue by product / English category |
 | Customer churn | Share of customers with no purchase in the last N days (e.g. 180) |
 
-> ⚠️ Use `customer_unique_id` for anything customer-level. `customer_id` is new on **every order**.
 
 ## Quick start (Phase 1)
 
@@ -69,14 +66,11 @@ make backfill START=2017-01-01 END=2017-01-31
 make test
 ```
 
-Set `LAKE_TARGET=s3` and `S3_BUCKET=...` in `.env` to write to AWS instead of `data/lake/`.
-
 ### Lake layout
 ```
 raw/olist/<table>/dt=YYYY-MM-DD/<table>.parquet   # + _batch_id, _business_date, _extracted_at
 raw/_manifests/dt=YYYY-MM-DD/manifest.json        # row counts per table, written last = success marker
 ```
-Re-running a date overwrites the same files, so runs are idempotent and backfills are safe.
 
 | Table | Load mode |
 |---|---|
@@ -98,16 +92,6 @@ Re-running a date overwrites the same files, so runs are idempotent and backfill
 | IAM role `olist-pipeline-ingestion` | Least privilege: read/write on `raw/*` only. Assumed through STS, so there are no long-lived keys. |
 | AWS Budget ($10/month) | Email alert at 80% actual or 100% forecasted spend |
 
-```bash
-# one-time: an admin IAM user's access keys in a named profile (never the root account)
-aws configure --profile olist-admin
-
-cp infra/terraform/terraform.tfvars.example infra/terraform/terraform.tfvars   # set alert_email
-make tf-init && make tf-plan && make tf-apply
-terraform -chdir=infra/terraform output -raw aws_config_snippet >> ~/.aws/config
-```
-Then in `.env` set `LAKE_TARGET=s3`, `S3_BUCKET=<lake_bucket output>` and `AWS_PROFILE=olist-ingestion`,
-and run `make extract DATE=2017-11-24` and `make s3-check`.
 
 ## Phase 5: Snowflake warehouse
 
@@ -120,13 +104,6 @@ and run `make extract DATE=2017-11-24` and `make s3-check`.
 | Service users | `OLIST_LOADER_SVC`, `OLIST_DBT_SVC`: `TYPE = SERVICE`, key-pair auth only |
 | Storage integration | `OLIST_S3_LAKE` assumes the `olist-pipeline-snowflake` IAM role (trust locked to Snowflake's IAM user + external ID). No AWS keys are stored in Snowflake. |
 
-**Loading (ELT):** each RAW table holds `RAW_DATA VARIANT` + file metadata (`_SOURCE_FILE`, `_FILE_ROW_NUMBER`,
-`_FILE_LAST_MODIFIED`, `_LOADED_AT`). Typing happens in dbt, so source schema changes never break a load.
-`COPY INTO` load metadata makes re-runs no-ops.
-
-**Reconciliation:** after each load, the rows in RAW for the manifest's `batch_id` must equal the manifest row count
-for every table. Results go to `AUDIT.LOAD_RECONCILIATION`, per-file COPY results to `AUDIT.COPY_HISTORY`, and any
-mismatch fails the run.
 
 ```bash
 make snowflake-render     # fill snowflake/01_account_setup.sql -> build/ ; run it in Snowsight as ACCOUNTADMIN
@@ -134,9 +111,6 @@ make snowflake-render     # fill snowflake/01_account_setup.sql -> build/ ; run 
 make sf-bootstrap         # file formats, stage, RAW + AUDIT tables
 make load DATE=2017-11-24
 ```
-
-> The Snowflake account is in AWS us-east-2 and the bucket in us-east-1, so S3 reads incur inter-region transfer
-> (~$0.02/GB, a few cents for this whole dataset). In production you'd co-locate them.
 
 ## Phase 6: dbt transformations
 
@@ -149,22 +123,6 @@ RAW (VARIANT) ──► STAGING (views)            ──► INTERMEDIATE (views
                                                                                mart_customer_cohorts
                                                                                mart_product_performance
 ```
-
-| Decision | Why |
-|---|---|
-| Customer grain = `customer_unique_id` | `customer_id` is regenerated per order; using it would make every customer look one-time |
-| Revenue = merchandise + freight, excluding `canceled` / `unavailable` | Configurable via `var('non_revenue_statuses')`; tested to tie out across order, item and month grains |
-| Churn = no purchase in 180 days, measured from the latest *revenue* order in the data | The "simulation clock"; trailing canceled orders don't move it. Window is `var('churn_window_days')` |
-| MRR → monthly revenue run rate | Olist has no subscriptions |
-| Marts are full-refresh tables, not incremental | ~100k orders rebuild in seconds; incremental logic would add risk (late-arriving reviews) for no gain at this scale |
-| Geolocation cleaned to Brazil's bounding box, averaged per zip prefix | Raw data has points in other countries and many points per zip |
-
-**Tests (105):** unique / not-null keys, relationships between every fact and dimension, accepted values
-(statuses, payment types, review scores), non-negative money, cohort retention between 0 and 1, plus singular tests:
-- `assert_revenue_ties_out_across_grains`: order, item and monthly revenue sums must match
-- `assert_latest_loads_reconciled`: dbt won't build on top of a load whose reconciliation failed
-- `assert_payments_cover_order_value`, `assert_delivered_orders_have_delivery_date`: known source quirks
-  (256 and 8 rows), set to **warn**, and to fail only if they grow
 
 **Results on the full history:**
 
@@ -186,14 +144,8 @@ make dbt-docs                       # lineage graph at http://localhost:8081
 ## Phase 7: Airflow orchestration
 
 The DAG `olist_daily` ([airflow/dags/olist_daily.py](airflow/dags/olist_daily.py)) runs one Olist business date
-end to end: `business_date → extract → load (+ reconciliation) → dbt_build`. It replays the store nine years behind
-real time, so the run on 2026-11-24 processes Black Friday 2017. Triggering it with a `business_date` runs any day
-by hand. Each task retries twice and times out after 30 minutes, and dates outside the dataset are skipped.
+end to end: `business_date → extract → load (+ reconciliation) → dbt_build`. 
 
-Airflow 3 runs locally in Docker next to the source database. The pipeline gets its own virtualenv inside the
-image, so dbt and the Snowflake connector never clash with Airflow's dependencies, and AWS and Snowflake
-credentials are mounted read-only at run time rather than baked into the image. Re-running a day is safe:
-a full run for 2017-11-24 took 56 seconds and left the marts unchanged to the cent.
 
 ```bash
 make airflow-up       # UI on http://localhost:8080 (local only, no login)
@@ -220,17 +172,6 @@ then switched to extracts and published to Tableau Public. Build steps and expec
 ![Revenue Overview](docs/img/revenue_overview.png)
 ![Customers & Retention](docs/img/customers_retention.png)
 ![Product Performance](docs/img/product_performance.png)
-
-Every KPI was checked against Snowflake (e.g. revenue R$15,735,527.03, 98,207 revenue orders, AOV R$160.23).
-
-### CSV export (for tools without a Snowflake connector)
-`publishing/export_marts.py` unloads each dbt mart inside Snowflake (`COPY INTO @~ … SINGLE = TRUE`, gzipped CSV),
-downloads it with one `GET` (retried with backoff), decompresses it atomically into `exports/`, and checks the CSV row
-count against the table. Server-side unload took the export from minutes to about a minute compared with fetching rows through the client.
-
-```bash
-make export        # exports/*.csv + exports/_manifest.json
-```
 
 ## Project structure
 ```
