@@ -167,6 +167,7 @@ then switched to extracts and published to Tableau Public. Build steps and expec
 
 
 ## Project structure
+
 ```
 ├── docker-compose.yml        # Postgres source DB
 ├── Makefile
