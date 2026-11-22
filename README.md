@@ -18,7 +18,7 @@ flowchart LR
     C -->|Glue PySpark| D[S3 processed/]
     D -->|COPY INTO| F[(Snowflake RAW)]
     F -->|dbt| G[(Snowflake<br/>STAGING → MARTS)]
-    G -->|export_marts.py<br/>CSV| H[Tableau Public]
+    G -->|live connection<br/>→ extracts| H[Tableau Public]
     AF[Airflow daily DAG] -.orchestrates.-> B & C & D & F & G
 ```
 
@@ -39,10 +39,10 @@ Airflow will map its run date to an Olist date so the daily schedule replays the
 | 5 | Snowflake: storage integration, stage, RAW tables, `COPY INTO`, reconciliation | ✅ done |
 | 6 | dbt: staging → intermediate → marts, 105 tests, docs | ✅ done |
 | 7 | Airflow: daily DAG, retries, SLAs, alerting | ⬜ |
-| 8 | Tableau Public: Revenue, Customers & Retention, Products dashboards (marts exported to CSV) | ⬜ |
+| 8 | Tableau: Revenue, Customers & Retention, Products dashboards ([live on Tableau Public](https://public.tableau.com/app/profile/tong.wang8791/viz/OlistE-CommerceAnalytics_17953182152810/RevenueOverview)) | ✅ done |
 | 9 | CI (GitHub Actions: pytest + `dbt build`), data quality monitoring page | ⬜ |
 
-## Dashboard metrics (planned)
+## Dashboard metrics
 | Metric | Definition |
 |---|---|
 | Total revenue | Sum of item `price` + `freight_value` for non-canceled orders |
@@ -183,9 +183,28 @@ make dbt-deps && make dbt-build     # run + test everything (via scripts/dbt.sh,
 make dbt-docs                       # lineage graph at http://localhost:8081
 ```
 
-## Phase 8: Tableau Public dashboards
+## Phase 8: Tableau dashboards
 
-Tableau Public can't connect to Snowflake, so the pipeline ends with a **publish step**:
+🔗 **[View the dashboards on Tableau Public](https://public.tableau.com/app/profile/tong.wang8791/viz/OlistE-CommerceAnalytics_17953182152810/RevenueOverview)**
+
+Built in Tableau Desktop on a **live connection to the Snowflake `MARTS` schema** (OAuth through the
+`TABLEAU_DESKTOP_OAUTH` security integration, read-only role `OLIST_REPORTER`, dedicated `OLIST_BI_WH` warehouse),
+then switched to extracts and published to Tableau Public. Build steps and expected values:
+[docs/tableau_guide.md](docs/tableau_guide.md).
+
+| Dashboard | What it shows | Headline |
+|---|---|---|
+| **Revenue Overview** | KPIs, monthly trend, new vs returning buyers, MoM growth, revenue by state, payment mix | Revenue grew ~8x from Jan 2017 to 2018 (Black Friday 2017 peak: R$1.17M); ~98% of each month's buyers are new |
+| **Customers & Retention** | Buyers, repeat rate, CLV, churn with an adjustable window (parameter), cohort retention heatmap, recency histogram | Only 3% of customers buy twice; month-1 retention is 0.45%; churn is 60.4% at 180 days |
+| **Product Performance** | Top categories coloured by rating, volume vs value, rating vs price, top products | Health & Beauty leads revenue (R$1.44M); the top 20 products are only 5.2% of revenue (long tail) |
+
+![Revenue Overview](docs/img/revenue_overview.png)
+![Customers & Retention](docs/img/customers_retention.png)
+![Product Performance](docs/img/product_performance.png)
+
+Every KPI was checked against Snowflake (e.g. revenue R$15,735,527.03, 98,207 revenue orders, AOV R$160.23).
+
+### CSV export (for tools without a Snowflake connector)
 `publishing/export_marts.py` unloads each dbt mart inside Snowflake (`COPY INTO @~ … SINGLE = TRUE`, gzipped CSV),
 downloads it with one `GET` (retried with backoff), decompresses it atomically into `exports/`, and checks the CSV row
 count against the table. Server-side unload took the export from minutes to about a minute compared with fetching rows through the client.
@@ -193,13 +212,6 @@ count against the table. Server-side unload took the export from minutes to abou
 ```bash
 make export        # exports/*.csv + exports/_manifest.json
 ```
-
-Dashboards (build steps in [docs/tableau_guide.md](docs/tableau_guide.md)):
-1. **Revenue Overview**: KPIs, monthly trend, new vs returning, MoM growth, revenue by state, payment mix
-2. **Customers & Retention**: CLV by customer type, churn with an adjustable window (parameter), cohort heatmap
-3. **Product Performance**: top categories, units vs revenue, review score vs price, top products
-
-🔗 *Tableau Public link: (to be added)*
 
 ## Project structure
 ```

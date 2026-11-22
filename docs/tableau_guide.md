@@ -1,6 +1,35 @@
-# Tableau Public build guide
+# Tableau build guide
 
-Three dashboards built from the CSVs in `exports/` (produced by `make export`).
+Three dashboards in `tableau/olist_dashboards.twb`. Two ways to feed them:
+
+- **Tableau Desktop → Snowflake (used for this project).** Connect live to `OLIST.MARTS`, build,
+  then switch each data source to **Extract** before publishing. See *0a* below.
+- **Tableau Public app → CSVs** in `exports/` (produced by `make export`). See *0b* below.
+
+## 0a. Tableau Desktop + Snowflake
+
+1. Install the Snowflake ODBC driver (Tableau prompts for it; driver name `SnowflakeDSIIDriver`).
+2. **Connect → Snowflake**: server `<account>.snowflakecomputing.com`, role `OLIST_REPORTER`,
+   warehouse `OLIST_BI_WH`, authentication **Sign in using OAuth**. This needs the
+   `TABLEAU_DESKTOP_OAUTH` security integration (section 8 of `snowflake/01_account_setup.sql`)
+   and `GRANT ROLE OLIST_REPORTER TO USER <you>`. Admin roles are blocked for OAuth.
+3. Database `OLIST`, schema `MARTS`. Create two data sources (**Data → New Data Source** each time;
+   don't add tables to an existing one):
+
+| Data source | Tables |
+|---|---|
+| Revenue Monthly | `MART_REVENUE_MONTHLY` |
+| Orders | `FCT_ORDERS` related to `DIM_CUSTOMERS` on `Customer Unique Id`. Performance options: Many-to-One, *All records match* |
+
+4. **Session expiry:** Snowflake caps Tableau Desktop's OAuth refresh token at 10 hours, and idle
+   sessions also expire ("OAuth refresh token is expired" / "Master token can never be renewed").
+   Fix: save, **File → Close**, reopen the workbook and sign in again. To avoid it entirely, switch
+   each data source to **Extract** (Data Source tab, top right); `.hyper` files are gitignored.
+   Tableau Public needs extracts anyway.
+
+Field names show title-cased in Tableau (`revenue` → **Revenue**, `is_partial_month` → **Is Partial Month**).
+
+## 0b. Tableau Public + CSVs
 
 | Dashboard | Data sources |
 |---|---|
@@ -12,8 +41,6 @@ Three dashboards built from the CSVs in `exports/` (produced by `make export`).
 > rebuild ratios from their parts (`SUM(revenue) / SUM(orders)`), so they stay correct under any filter.
 
 ---
-
-## 0. Setup (10 min)
 
 1. Create a free account at **public.tableau.com**, then **Create → Download the App** (Tableau Public for Mac).
 2. Open Tableau Public. Under **Connect → To a File → Text file**, open `exports/mart_revenue_monthly.csv`.
@@ -57,12 +84,26 @@ Complete Month      = NOT [is_partial_month]
 | **KPI – Customers** | Source *Orders*: `COUNTD(customer_unique_id)` with filter `is_revenue_order = true`. (Don't sum `active_customers` across months: it double-counts people.) |
 | **Revenue Trend** | Columns: `MONTH(month)` (green/continuous). Rows: `SUM(revenue)`. Line + area. Filter `Complete Month = True`. Add a trend line (Analytics pane). |
 | **New vs Returning** | Columns: `MONTH(month)`. Rows: Measure Values = `SUM(new_customers)`, `SUM(returning_customers)`. Stacked bars, color by Measure Names. |
-| **MoM Growth** | Columns: `MONTH(month)`. Rows: `AVG(revenue_mom_growth)` (one row per month, so AVG = the value). Bars, color by sign: `[revenue_mom_growth] > 0`. Format as %. |
+| **MoM Growth** | Columns: `MONTH(month)`. Rows: `AVG(revenue_mom_growth)` (one row per month, so AVG = the value). Bars, color by sign: `AVG([revenue_mom_growth]) > 0` (green/red). Format as %. **Filter `month` to Feb 2017 – Aug 2018**: the months after near-empty ones show absurd growth (Oct 2016 +18,261%, Jan 2017 +697,879%) and flatten every other bar. |
 | **Revenue by State** | Source *Orders*: `state` (from dim_customers) → geographic role **State/Province**. Map → Edit Locations → Country **Brazil**. Color `SUM(revenue)`. If a state doesn't place, use a symbol map on `AVG(latitude)` / `AVG(longitude)` instead. |
 | **Payment Mix** | Source *Orders*: Rows `primary_payment_type`, Columns `SUM(revenue)`, sorted descending, filter `is_revenue_order = true`. |
 
+### Expected values (check against these)
+| Measure | Value | Note |
+|---|---|---|
+| Total Revenue | R$15,736K | ties to the source DB to the cent |
+| Orders | 98,207 | `mart_revenue_monthly` counts **revenue orders only**; 99,441 includes 1,234 canceled/unavailable |
+| AOV | R$160.23 | `SUM(revenue) / SUM(orders)` |
+| Customers | 94,990 | distinct buyers with ≥ 1 revenue order (96,096 includes cancel-only customers) |
+| Peak month | Nov 2017, R$1.17M | Black Friday; MoM +53%, then Dec −27% |
+| Top state | SP, R$5.9M (~37%) | then RJ R$2.1M, MG R$1.8M |
+| Payment mix | credit card 78%, boleto 18%, voucher 2%, debit 1% | exclude the one Null (R$143) |
+
+Map tip: Tableau recognises the two-letter state codes once `state` has the State/Province role.
+If the dashboard tile shows the whole world, use the map toolbar's reset (home) button.
+
 ### Dashboard
-**Dashboard → New Dashboard**, Size **Fixed 1200 × 900**. KPI row on top, Revenue Trend full width,
+**Dashboard → New Dashboard**, Size **Fixed 1200 × 900**. KPI row on top (set each KPI tile to **Fit → Entire View** to avoid scrollbars), Revenue Trend full width,
 then New vs Returning, MoM Growth, and Map + Payment Mix. Use a **Year** filter (from `month`) applied to all
 sheets using that source (filter menu → Apply to Worksheets → All Using This Data Source).
 
@@ -130,6 +171,11 @@ Add a **Category** filter applied to all Products sheets. Insight title, e.g.
 2. Use one consistent palette and font. Hide sheet tabs that aren't dashboards (right-click → Hide).
 3. Add a footer text object: *"Source: Olist (Kaggle) · Pipeline: Postgres → S3 → Snowflake → dbt → Tableau · github.com/<you>/…"*.
 4. **File → Save to Tableau Public**. On the web page: Edit details → description and the GitHub link; toggle "Allow workbook download".
+   - If **Server → Tableau Public** is greyed out, check **Help → Manage Product Keys**: *Tableau Desktop Free
+     Edition* cannot publish to Tableau Public (only Public Edition can). Workaround used here: switch every data
+     source to Extract, **File → Export Packaged Workbook** (`.twbx`, gitignored), open it in **Tableau Desktop
+     Public Edition**, then **File → Save to Tableau Public As…**.
+   - Only the tab that was active when saving is shown at first: turn on *Show Workbook Sheets as Tabs* (gear icon).
 5. Copy the public URL into the project README (Phase 8 section) and take a screenshot of each dashboard for `docs/img/`.
 
 ## Refreshing after the pipeline runs

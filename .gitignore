@@ -19,3 +19,8 @@ terraform.tfvars
 build/
 .user.yml
 exports/
+
+# Tableau extracts are local data copies (rebuilt from Snowflake)
+*.hyper
+*.twbr
+*.twbx

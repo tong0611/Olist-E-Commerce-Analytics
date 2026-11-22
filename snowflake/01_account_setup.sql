@@ -123,7 +123,19 @@ GRANT ROLE OLIST_TRANSFORMER TO USER OLIST_DBT_SVC;
 -- (your own login inherits all three roles through ACCOUNTADMIN -> SYSADMIN)
 
 -- ---------------------------------------------------------------------------
--- 8. Hand these two values back for the AWS trust policy (Terraform)
+-- 8. Tableau Desktop sign-in via OAuth (no stored passwords or keys).
+--    Admin roles (ACCOUNTADMIN, SECURITYADMIN, ORGADMIN) are blocked for OAuth
+--    by default, so BI users connect with the read-only OLIST_REPORTER role:
+--      GRANT ROLE OLIST_REPORTER TO USER <analyst>;
+--    Snowflake caps the refresh token for this client at 10 hours.
+-- ---------------------------------------------------------------------------
+CREATE SECURITY INTEGRATION IF NOT EXISTS TABLEAU_DESKTOP_OAUTH
+  TYPE = OAUTH
+  ENABLED = TRUE
+  OAUTH_CLIENT = TABLEAU_DESKTOP;
+
+-- ---------------------------------------------------------------------------
+-- 9. Hand these two values back for the AWS trust policy (Terraform)
 --    property = STORAGE_AWS_IAM_USER_ARN and STORAGE_AWS_EXTERNAL_ID
 -- ---------------------------------------------------------------------------
 DESC INTEGRATION OLIST_S3_LAKE;
